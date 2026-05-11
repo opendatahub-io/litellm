@@ -50,6 +50,6 @@
   "overrides": {
     "webpack-dev-server": ">=5.2.1",
     "form-data": ">=4.0.4",
-    "mermaid": ">=11.10.0"
+    "mermaid": ">=11.15.0"
   }
 }
