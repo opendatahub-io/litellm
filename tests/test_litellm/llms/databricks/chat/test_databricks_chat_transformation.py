@@ -10,7 +10,11 @@ sys.path.insert(
 )  # Adds the parent directory to the system path
 from unittest.mock import MagicMock, patch
 
-from litellm.llms.databricks.chat.transformation import DatabricksConfig
+from litellm.llms.databricks.chat.transformation import (
+    DatabricksChatResponseIterator,
+    DatabricksConfig,
+    _sanitize_empty_content,
+)
 
 
 def test_transform_choices():
@@ -85,8 +89,174 @@ def test_transform_choices_without_signature():
     assert choices[0].message.reasoning_content == "i'm thinking without signature."
     assert choices[0].message.thinking_blocks is not None
     assert len(choices[0].message.thinking_blocks) == 1
-    
+
     # Verify the thinking block was created successfully without signature
     thinking_block = choices[0].message.thinking_blocks[0]
     assert thinking_block["type"] == "thinking"
     assert thinking_block["thinking"] == "i'm thinking without signature."
+
+
+def test_convert_anthropic_tool_to_databricks_tool_with_description():
+    config = DatabricksConfig()
+    anthropic_tool = {
+        "name": "test_tool",
+        "description": "test description",
+        "input_schema": {"type": "object", "properties": {"test": {"type": "string"}}},
+    }
+
+    databricks_tool = config.convert_anthropic_tool_to_databricks_tool(anthropic_tool)
+
+    assert databricks_tool is not None
+    assert databricks_tool["type"] == "function"
+    assert databricks_tool["function"]["description"] == "test description"
+
+
+def test_convert_anthropic_tool_to_databricks_tool_without_description():
+    config = DatabricksConfig()
+    anthropic_tool = {
+        "name": "test_tool",
+        "input_schema": {"type": "object", "properties": {"test": {"type": "string"}}},
+    }
+
+    databricks_tool = config.convert_anthropic_tool_to_databricks_tool(anthropic_tool)
+
+    assert databricks_tool is not None
+    assert databricks_tool["type"] == "function"
+    assert databricks_tool["function"].get("description") is None
+
+
+def test_transform_choices_with_citations():
+    config = DatabricksConfig()
+    databricks_choices = [
+        {
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Blue",
+                        "citations": [
+                            {
+                                "type": "char_location",
+                                "cited_text": "The sky is blue.",
+                                "document_index": 0,
+                                "document_title": "My Document",
+                                "start_char_index": 0,
+                                "end_char_index": 50,
+                            }
+                        ],
+                    }
+                ],
+            },
+            "index": 0,
+            "finish_reason": "stop",
+        }
+    ]
+
+    choices = config._transform_dbrx_choices(choices=databricks_choices)
+
+    assert choices[0].message.provider_specific_fields == {
+        "citations": [
+            [
+                {
+                    "type": "char_location",
+                    "cited_text": "The sky is blue.",
+                    "document_index": 0,
+                    "document_title": "My Document",
+                    "start_char_index": 0,
+                    "end_char_index": 50,
+                    "supported_text": "Blue",
+                }
+            ]
+        ]
+    }
+
+
+def test_chunk_parser_with_citation():
+    iterator = DatabricksChatResponseIterator(None, sync_stream=True)
+    chunk = {
+        "id": "1",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "test",
+        "choices": [
+            {
+                "delta": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "",
+                            "citations": [
+                                {
+                                    "type": "char_location",
+                                    "cited_text": "The sky is blue.",
+                                    "document_index": 0,
+                                    "document_title": "My Document",
+                                    "start_char_index": 0,
+                                    "end_char_index": 50,
+                                }
+                            ],
+                        }
+                    ],
+                },
+                "index": 0,
+                "finish_reason": None,
+            }
+        ],
+    }
+
+    parsed = iterator.chunk_parser(chunk)
+    assert parsed.choices[0].delta.provider_specific_fields == {
+        "citation": {
+            "type": "char_location",
+            "cited_text": "The sky is blue.",
+            "document_index": 0,
+            "document_title": "My Document",
+            "start_char_index": 0,
+            "end_char_index": 50,
+        }
+    }
+
+
+def test_sanitize_empty_content_pops_none():
+    message = {"role": "user", "content": None}
+    _sanitize_empty_content(message)
+    assert "content" not in message
+
+
+def test_sanitize_empty_content_pops_empty_string():
+    message = {"role": "user", "content": ""}
+    _sanitize_empty_content(message)
+    assert "content" not in message
+
+
+def test_sanitize_empty_content_pops_single_empty_text_block():
+    message = {"role": "user", "content": [{"type": "text", "text": ""}]}
+    _sanitize_empty_content(message)
+    assert "content" not in message
+
+
+def test_sanitize_empty_content_filters_empty_blocks_keeps_non_empty():
+    message = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": ""},
+            {"type": "text", "text": "Hello"},
+            {"type": "text", "text": "  "},
+        ],
+    }
+    _sanitize_empty_content(message)
+    assert message["content"] == [{"type": "text", "text": "Hello"}]
+
+
+def test_transform_messages_sanitizes_empty_content():
+    config = DatabricksConfig()
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": ""}]},
+        {"role": "user", "content": "Hi"},
+    ]
+    result = config._transform_messages(
+        messages=messages, model="databricks-claude", is_async=False
+    )
+    assert "content" not in result[0]
+    assert result[1]["content"] == "Hi"

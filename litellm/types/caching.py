@@ -1,7 +1,8 @@
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel
+from typing_extensions import TypedDict
 
 
 class LiteLLMCacheType(str, Enum):
@@ -26,6 +27,8 @@ CachingSupportedCallTypes = Literal[
     "text_completion",
     "arerank",
     "rerank",
+    "responses",
+    "aresponses",
 ]
 
 
@@ -47,6 +50,24 @@ class RedisPipelineSetOperation(TypedDict):
     key: str
     value: Any
     ttl: Optional[int]
+
+
+class RedisPipelineRpushOperation(TypedDict):
+    """
+    TypedDict for 1 Redis Pipeline RPUSH Operation
+    """
+
+    key: str
+    values: List[Any]
+
+
+class RedisPipelineLpopOperation(TypedDict):
+    """
+    TypedDict for 1 Redis Pipeline LPOP Operation
+    """
+
+    key: str
+    count: Optional[int]
 
 
 DynamicCacheControl = TypedDict(
@@ -92,7 +113,9 @@ class HealthCheckCacheParams(BaseModel):
 
 class CachedEmbedding(TypedDict):
     """Type definition for cached embedding objects"""
+
     embedding: Optional[List[float]]
     index: Optional[int]
     object: Optional[str]
     model: Optional[str]
+    prompt_tokens_details: Optional[dict]

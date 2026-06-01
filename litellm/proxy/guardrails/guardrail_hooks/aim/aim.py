@@ -7,7 +7,7 @@
 import asyncio
 import json
 import os
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Literal, Optional, Type, Union
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Optional, Type, Union
 
 from fastapi import HTTPException
 from pydantic import BaseModel
@@ -22,7 +22,13 @@ from litellm.llms.custom_httpx.http_handler import (
     httpxSpecialProvider,
 )
 from litellm.proxy._types import UserAPIKeyAuth
+from litellm.proxy.guardrails._content_utils import (
+    apply_redacted_messages_back,
+    build_inspection_messages,
+    has_non_string_content,
+)
 from litellm.types.utils import (
+    CallTypesLiteral,
     Choices,
     EmbeddingResponse,
     ImageResponse,
@@ -42,8 +48,10 @@ class AimGuardrail(CustomGuardrail):
     def __init__(
         self, api_key: Optional[str] = None, api_base: Optional[str] = None, **kwargs
     ):
+        ssl_verify = kwargs.pop("ssl_verify", None)
         self.async_handler = get_async_httpx_client(
-            llm_provider=httpxSpecialProvider.GuardrailCallback
+            llm_provider=httpxSpecialProvider.GuardrailCallback,
+            params={"ssl_verify": ssl_verify} if ssl_verify is not None else None,
         )
         self.api_key = api_key or os.environ.get("AIM_API_KEY")
         if not self.api_key:
@@ -67,20 +75,9 @@ class AimGuardrail(CustomGuardrail):
         user_api_key_dict: UserAPIKeyAuth,
         cache: DualCache,
         data: dict,
-        call_type: Literal[
-            "completion",
-            "text_completion",
-            "embeddings",
-            "image_generation",
-            "moderation",
-            "audio_transcription",
-            "pass_through_endpoint",
-            "rerank",
-            "mcp_call",
-        ],
+        call_type: CallTypesLiteral,
     ) -> Union[Exception, str, dict, None]:
         verbose_proxy_logger.debug("Inside AIM Pre-Call Hook")
-
         return await self.call_aim_guardrail(
             data, hook="pre_call", key_alias=user_api_key_dict.key_alias
         )
@@ -89,15 +86,7 @@ class AimGuardrail(CustomGuardrail):
         self,
         data: dict,
         user_api_key_dict: UserAPIKeyAuth,
-        call_type: Literal[
-            "completion",
-            "embeddings",
-            "image_generation",
-            "moderation",
-            "audio_transcription",
-            "responses",
-            "mcp_call",
-        ],
+        call_type: CallTypesLiteral,
     ) -> Union[Exception, str, dict, None]:
         verbose_proxy_logger.debug("Inside AIM Moderation Hook")
 
@@ -117,10 +106,11 @@ class AimGuardrail(CustomGuardrail):
             user_email=user_email,
             litellm_call_id=call_id,
         )
+        # Covers multimodal list content + Responses-API input.
         response = await self.async_handler.post(
             f"{self.api_base}/fw/v1/analyze",
             headers=headers,
-            json={"messages": data.get("messages", [])},
+            json={"messages": build_inspection_messages(data)},
         )
         response.raise_for_status()
         res = response.json()
@@ -134,9 +124,7 @@ class AimGuardrail(CustomGuardrail):
         elif action_type == "block_action":
             self._handle_block_action(res["analysis_result"], required_action)
         elif action_type == "anonymize_action":
-            return self._anonymize_request(
-                res["analysis_result"], required_action, data
-            )
+            return self._anonymize_request(res, data)
         else:
             verbose_proxy_logger.error(f"Aim: {action_type} action")
         return data
@@ -150,29 +138,36 @@ class AimGuardrail(CustomGuardrail):
         )
         raise HTTPException(status_code=400, detail=detection_message)
 
-    def _anonymize_request(
-        self, analysis_result: Any, required_action: Any, data: dict
-    ) -> dict:
+    def _anonymize_request(self, res: Any, data: dict) -> dict:
         verbose_proxy_logger.info("Aim: anonymize action")
-        redaction_result = required_action and required_action.get(
-            "chat_redaction_result"
-        )
-        if not redaction_result:
+        redacted_chat = res.get("redacted_chat")
+        if not redacted_chat:
             return data
-        if analysis_result and analysis_result.get("session_entities"):
-            self._set_dlp_entities(analysis_result.get("session_entities"))
-        data["messages"] = [
-            {
-                "role": redaction_result["redacted_new_message"]["role"],
-                "content": redaction_result["redacted_new_message"]["content"],
-            }
-        ] + [
+        # Aim returns text-only redacted messages. Overwriting
+        # ``data["messages"]`` with that would silently strip image/audio
+        # parts from a multimodal request — degrade to block so the
+        # multimodal payload is never silently rewritten.
+        if has_non_string_content(data):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Aim: anonymize action requested for multimodal input "
+                    "but mask-in-place would drop non-text parts. Send the "
+                    "request with plain string content to use anonymize, "
+                    "or rely on block-mode policies."
+                ),
+            )
+        redacted_messages = [
             {
                 "role": message["role"],
                 "content": message["content"],
             }
-            for message in redaction_result["all_redacted_messages"]
+            for message in redacted_chat["all_redacted_messages"]
         ]
+        # Write back to ``messages`` AND ``input``. The Responses-API
+        # backend reads ``input``; writing only to ``messages`` would let
+        # unredacted text reach the LLM for ``/v1/responses`` calls.
+        apply_redacted_messages_back(data, redacted_messages)
         return data
 
     async def call_aim_guardrail_on_output(
@@ -191,7 +186,7 @@ class AimGuardrail(CustomGuardrail):
                 litellm_call_id=call_id,
             ),
             json={
-                "messages": request_data.get("messages", [])
+                "messages": build_inspection_messages(request_data)
                 + [{"role": "assistant", "content": output}]
             },
         )
@@ -203,7 +198,13 @@ class AimGuardrail(CustomGuardrail):
             return self._handle_block_action_on_output(
                 res["analysis_result"], required_action
             )
-        return self._deanonymize_output(output)
+        redacted_chat = res.get("redacted_chat", None)
+
+        if action_type and action_type == "anonymize_action" and redacted_chat:
+            return {
+                "redacted_output": redacted_chat["all_redacted_messages"][-1]["content"]
+            }
+        return {"redacted_output": output}
 
     def _handle_block_action_on_output(
         self, analysis_result: Any, required_action: Any
@@ -216,15 +217,6 @@ class AimGuardrail(CustomGuardrail):
             ),
         )
         return {"detection_message": detection_message}
-
-    def _deanonymize_output(self, output: str) -> dict | None:
-        try:
-            for entity in self.dlp_entities:
-                output = output.replace(f"[{entity['name']}]", entity["content"])
-            return {"redacted_output": output}
-        except Exception as e:
-            verbose_proxy_logger.error(f"Aim: Error while redacting output: {e}")
-            return None
 
     def _build_aim_headers(
         self,
@@ -246,13 +238,13 @@ class AimGuardrail(CustomGuardrail):
                 "x-aim-litellm-version": litellm_version,
             }
             # Used by Aim to track together single call input and output
-            | ({"x-aim-litellm-call-id": litellm_call_id} if litellm_call_id else {})
+            | ({"x-aim-call-id": litellm_call_id} if litellm_call_id else {})
             # Used by Aim to track guardrails violations by user.
             | ({"x-aim-user-email": user_email} if user_email else {})
             | (
                 {
                     # Used by Aim apply only the guardrails that are associated with the key alias.
-                    "x-aim-litellm-key-alias": key_alias,
+                    "x-aim-gateway-key-alias": key_alias,
                 }
                 if key_alias
                 else {}
@@ -265,15 +257,33 @@ class AimGuardrail(CustomGuardrail):
         user_api_key_dict: UserAPIKeyAuth,
         response: Union[Any, ModelResponse, EmbeddingResponse, ImageResponse],
     ) -> Any:
-        if (
-            isinstance(response, ModelResponse)
-            and response.choices
-            and isinstance(response.choices[0], Choices)
-        ):
-            content = response.choices[0].message.content or ""
-            aim_output_guardrail_result = await self.call_aim_guardrail_on_output(
-                data, content, hook="output", key_alias=user_api_key_dict.key_alias
-            )
+        if not (isinstance(response, ModelResponse) and response.choices):
+            return response
+        # Inspect every choice — when ``n>1`` the additional completions
+        # used to bypass Aim entirely because the hook only inspected
+        # ``choices[0]``. Run inspections concurrently so multi-completion
+        # responses don't pay an n× latency penalty.
+        choices_to_inspect = [c for c in response.choices if isinstance(c, Choices)]
+        if not choices_to_inspect:
+            return response
+        # ``return_exceptions=True`` lets every inspection finish even if
+        # one fails — without it, the first exception would propagate and
+        # leave the remaining tasks running in the background.
+        results = await asyncio.gather(
+            *(
+                self.call_aim_guardrail_on_output(
+                    data,
+                    choice.message.content or "",
+                    hook="output",
+                    key_alias=user_api_key_dict.key_alias,
+                )
+                for choice in choices_to_inspect
+            ),
+            return_exceptions=True,
+        )
+        for choice, aim_output_guardrail_result in zip(choices_to_inspect, results):
+            if isinstance(aim_output_guardrail_result, BaseException):
+                raise aim_output_guardrail_result
             if aim_output_guardrail_result and aim_output_guardrail_result.get(
                 "detection_message"
             ):
@@ -284,7 +294,7 @@ class AimGuardrail(CustomGuardrail):
             if aim_output_guardrail_result and aim_output_guardrail_result.get(
                 "redacted_output"
             ):
-                response.choices[0].message.content = aim_output_guardrail_result.get(
+                choice.message.content = aim_output_guardrail_result.get(
                     "redacted_output"
                 )
         return response
@@ -340,9 +350,6 @@ class AimGuardrail(CustomGuardrail):
                 chunk = json.dumps(chunk)
             await websocket.send(chunk)
         await websocket.send(json.dumps({"done": True}))
-
-    def _set_dlp_entities(self, entities: list[dict]) -> None:
-        self.dlp_entities = entities[: self._max_dlp_entities]
 
     @staticmethod
     def get_config_model() -> Optional[Type["GuardrailConfigModel"]]:

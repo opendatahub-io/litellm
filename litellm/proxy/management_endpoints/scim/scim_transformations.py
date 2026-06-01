@@ -40,8 +40,14 @@ class ScimTransformations:
         user_updated_at = user.updated_at.isoformat() if user.updated_at else None
 
         emails = []
-        if user.user_email:
+        # Only add email if it's a valid email address (contains @)
+        # user_email can be a UUID when users are created without an email
+        if user.user_email and "@" in user.user_email:
             emails.append(SCIMUserEmail(value=user.user_email, primary=True))
+
+        metadata = user.metadata or {}
+        scim_active = metadata.get("scim_active")
+        active = True if scim_active is None else bool(scim_active)
 
         return SCIMUser(
             schemas=["urn:ietf:params:scim:schemas:core:2.0:User"],
@@ -54,7 +60,7 @@ class ScimTransformations:
             ),
             emails=emails,
             groups=groups,
-            active=True,
+            active=active,
             meta={
                 "resourceType": "User",
                 "created": user_created_at,
@@ -121,15 +127,16 @@ class ScimTransformations:
         if isinstance(team, dict):
             team = LiteLLM_TeamTable(**team)
 
-        # Get team members
+        # Get team members with proper display names
         scim_members: List[SCIMMember] = []
         for member in team.members_with_roles or []:
             if isinstance(member, dict):
                 member = Member(**member)
+
             scim_members.append(
                 SCIMMember(
                     value=ScimTransformations._get_scim_member_value(member),
-                    display=member.user_email,
+                    display=ScimTransformations._get_scim_member_display(member),
                 )
             )
 
@@ -151,6 +158,24 @@ class ScimTransformations:
 
     @staticmethod
     def _get_scim_member_value(member: Member) -> str:
-        if member.user_email:
+        """
+        Get the SCIM member value. Use user_email if available, otherwise use user_id.
+        SCIM member value should be the unique identifier for the user.
+        """
+        if hasattr(member, "user_email") and member.user_email:
             return member.user_email
+        elif hasattr(member, "user_id"):
+            return member.user_id or ScimTransformations.DEFAULT_SCIM_MEMBER_VALUE
+        return ScimTransformations.DEFAULT_SCIM_MEMBER_VALUE
+
+    @staticmethod
+    def _get_scim_member_display(member: Member) -> str:
+        """
+        Get the SCIM member display. Use user_email if available, otherwise use user_id.
+        SCIM member display should be the display name for the user.
+        """
+        if hasattr(member, "user_email") and member.user_email:
+            return member.user_email
+        elif hasattr(member, "user_id"):
+            return member.user_id or ScimTransformations.DEFAULT_SCIM_MEMBER_VALUE
         return ScimTransformations.DEFAULT_SCIM_MEMBER_VALUE

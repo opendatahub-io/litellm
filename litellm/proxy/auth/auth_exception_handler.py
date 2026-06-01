@@ -2,17 +2,27 @@
 Handles Authentication Errors
 """
 
-import asyncio
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 from fastapi import HTTPException, Request, status
 
 import litellm
 from litellm._logging import verbose_proxy_logger
-from litellm.proxy._types import ProxyErrorTypes, ProxyException, UserAPIKeyAuth
+from litellm.proxy._types import (
+    LitellmUserRoles,
+    ProxyErrorTypes,
+    ProxyException,
+    UserAPIKeyAuth,
+)
 from litellm.proxy.auth.auth_utils import _get_request_ip_address
 from litellm.proxy.db.exception_handler import PrismaDBExceptionHandler
 from litellm.types.services import ServiceTypes
+
+# Sentinel user_id for the synthetic UserAPIKeyAuth issued during a DB
+# outage when allow_requests_on_db_unavailable is True. Downstream
+# enforcement can key off this value; it must never collide with a real
+# user_id.
+DB_UNAVAILABLE_FALLBACK_USER_ID = "__db_unavailable_fallback__"
 
 if TYPE_CHECKING:
     from opentelemetry.trace import Span as _Span
@@ -44,11 +54,10 @@ class UserAPIKeyAuthExceptionHandler:
             - UserAPIKeyAuth: If general_settings.allow_requests_on_db_unavailable is True
 
         Raises:
-            - Orignal Exception in all other cases
+            - Original Exception in all other cases
         """
         from litellm.proxy.proxy_server import (
             general_settings,
-            litellm_proxy_admin_name,
             proxy_logging_obj,
         )
 
@@ -64,10 +73,17 @@ class UserAPIKeyAuthExceptionHandler:
                 duration=0.0,
             )
 
+            # Non-admin restricted token so a DB outage cannot escalate
+            # an anonymous caller to proxy-admin privileges.
+            verbose_proxy_logger.warning(
+                "Auth: DB unavailable — issuing restricted INTERNAL_USER "
+                "fallback token (allow_requests_on_db_unavailable=True)"
+            )
             return UserAPIKeyAuth(
                 key_name="failed-to-connect-to-db",
                 token="failed-to-connect-to-db",
-                user_id=litellm_proxy_admin_name,
+                user_id=DB_UNAVAILABLE_FALLBACK_USER_ID,
+                user_role=LitellmUserRoles.INTERNAL_USER,
                 request_route=route,
             )
         else:
@@ -90,15 +106,17 @@ class UserAPIKeyAuthExceptionHandler:
                 api_key=api_key,
                 request_route=route,
             )
-            asyncio.create_task(
-                proxy_logging_obj.post_call_failure_hook(
-                    request_data=request_data,
-                    original_exception=e,
-                    user_api_key_dict=user_api_key_dict,
-                    error_type=ProxyErrorTypes.auth_error,
-                    route=route,
-                )
+            # Allow callbacks to transform the error response
+            transformed_exception = await proxy_logging_obj.post_call_failure_hook(
+                request_data=request_data,
+                original_exception=e,
+                user_api_key_dict=user_api_key_dict,
+                error_type=ProxyErrorTypes.auth_error,
+                route=route,
             )
+            # Use transformed exception if callback returned one, otherwise use original
+            if transformed_exception is not None:
+                e = transformed_exception
 
             if isinstance(e, litellm.BudgetExceededError):
                 raise ProxyException(

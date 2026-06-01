@@ -3,14 +3,16 @@ Transformation for Bedrock Invoke Agent
 
 https://docs.aws.amazon.com/bedrock/latest/APIReference/API_agent-runtime_InvokeAgent.html
 """
+
 import base64
 import json
-import uuid
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import httpx
 
 from litellm._logging import verbose_logger
+from litellm._uuid import uuid
+from litellm.litellm_core_utils.url_utils import encode_url_path_segment
 from litellm.litellm_core_utils.prompt_templates.common_utils import (
     convert_content_list_to_str,
 )
@@ -22,6 +24,11 @@ from litellm.types.llms.bedrock_invoke_agents import (
     InvokeAgentEvent,
     InvokeAgentEventHeaders,
     InvokeAgentEventList,
+    InvokeAgentMetadata,
+    InvokeAgentModelInvocationInput,
+    InvokeAgentModelInvocationOutput,
+    InvokeAgentOrchestrationTrace,
+    InvokeAgentPreProcessingTrace,
     InvokeAgentTrace,
     InvokeAgentTracePayload,
     InvokeAgentUsage,
@@ -91,8 +98,15 @@ class AmazonInvokeAgentConfig(BaseConfig, BaseAWSLLM):
 
         agent_id, agent_alias_id = self._get_agent_id_and_alias_id(model)
         session_id = self._get_session_id(optional_params)
+        encoded_agent_id = encode_url_path_segment(agent_id, field_name="agent_id")
+        encoded_agent_alias_id = encode_url_path_segment(
+            agent_alias_id, field_name="agent_alias_id"
+        )
+        encoded_session_id = encode_url_path_segment(
+            session_id, field_name="session_id"
+        )
 
-        endpoint_url = f"{endpoint_url}/agents/{agent_id}/agentAliases/{agent_alias_id}/sessions/{session_id}/text"
+        endpoint_url = f"{endpoint_url}/agents/{encoded_agent_id}/agentAliases/{encoded_agent_alias_id}/sessions/{encoded_session_id}/text"
 
         return endpoint_url
 
@@ -389,15 +403,22 @@ class AmazonInvokeAgentConfig(BaseConfig, BaseAWSLLM):
         self, trace_data: InvokeAgentTrace, usage_info: InvokeAgentUsage
     ) -> None:
         """Extract usage information from preprocessing trace."""
-        pre_processing = trace_data.get("preProcessingTrace", {})
+        pre_processing: Optional[InvokeAgentPreProcessingTrace] = trace_data.get(
+            "preProcessingTrace"
+        )
         if not pre_processing:
             return
 
-        model_output = pre_processing.get("modelInvocationOutput", {})
+        model_output: Optional[InvokeAgentModelInvocationOutput] = (
+            pre_processing.get("modelInvocationOutput")
+            or InvokeAgentModelInvocationOutput()
+        )
         if not model_output:
             return
 
-        metadata = model_output.get("metadata", {})
+        metadata: Optional[InvokeAgentMetadata] = (
+            model_output.get("metadata") or InvokeAgentMetadata()
+        )
         if not metadata:
             return
 
@@ -412,11 +433,16 @@ class AmazonInvokeAgentConfig(BaseConfig, BaseAWSLLM):
         self, trace_data: InvokeAgentTrace
     ) -> Optional[str]:
         """Extract model information from orchestration trace."""
-        orchestration_trace = trace_data.get("orchestrationTrace", {})
+        orchestration_trace: Optional[InvokeAgentOrchestrationTrace] = trace_data.get(
+            "orchestrationTrace"
+        )
         if not orchestration_trace:
             return None
 
-        model_invocation = orchestration_trace.get("modelInvocationInput", {})
+        model_invocation: Optional[InvokeAgentModelInvocationInput] = (
+            orchestration_trace.get("modelInvocationInput")
+            or InvokeAgentModelInvocationInput()
+        )
         if not model_invocation:
             return None
 

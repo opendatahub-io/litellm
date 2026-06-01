@@ -103,36 +103,39 @@ async def test_callback():
     }
 
     # Test violation detection
+    mock_response = Response(
+        json={
+            "violations_detected": True,
+            "deputies": {
+                "jailbreak": True,
+                "custom-policies": False,
+                "sexual": False,
+                "hate": False,
+                "illegality": False,
+                "violence": False,
+                "pattern-detection": False,
+            },
+            "deputies_predictions": {
+                "jailbreak": 0.923,
+                "custom-policies": 0.234,
+                "sexual": 0.145,
+                "hate": 0.156,
+                "illegality": 0.167,
+                "violence": 0.178,
+                "pattern-detection": 0.189,
+            },
+            "findings": {"jailbreak": [{"action": "BLOCK", "severity": "HIGH"}]},
+        },
+        status_code=200,
+        request=Request(
+            method="POST", url="https://server.lasso.security/gateway/v2/classify"
+        ),
+    )
+    mock_response.raise_for_status = lambda: None
+
     with pytest.raises(HTTPException) as excinfo:
-        with patch(
-            "litellm.llms.custom_httpx.http_handler.AsyncHTTPHandler.post",
-            return_value=Response(
-                json={
-                    "deputies": {
-                        "jailbreak": True,
-                        "custom-policies": False,
-                        "sexual": False,
-                        "hate": False,
-                        "illegality": False,
-                        "violence": False,
-                        "pattern-detection": False,
-                    },
-                    "deputies_predictions": {
-                        "jailbreak": 0.923,
-                        "custom-policies": 0.234,
-                        "sexual": 0.145,
-                        "hate": 0.156,
-                        "illegality": 0.167,
-                        "violence": 0.178,
-                        "pattern-detection": 0.189,
-                    },
-                    "violations_detected": True,
-                },
-                status_code=200,
-                request=Request(
-                    method="POST", url="https://server.lasso.security/gateway/v1/chat"
-                ),
-            ),
+        with patch.object(
+            lasso_guardrail.async_handler, "post", return_value=mock_response
         ):
             await lasso_guardrail.async_pre_call_hook(
                 data=data,
@@ -146,35 +149,38 @@ async def test_callback():
     assert "jailbreak" in str(excinfo.value.detail)
 
     # Test no violation
-    with patch(
-        "litellm.llms.custom_httpx.http_handler.AsyncHTTPHandler.post",
-        return_value=Response(
-            json={
-                "deputies": {
-                    "jailbreak": False,
-                    "custom-policies": False,
-                    "sexual": False,
-                    "hate": False,
-                    "illegality": False,
-                    "violence": False,
-                    "pattern-detection": False,
-                },
-                "deputies_predictions": {
-                    "jailbreak": 0.123,
-                    "custom-policies": 0.234,
-                    "sexual": 0.145,
-                    "hate": 0.156,
-                    "illegality": 0.167,
-                    "violence": 0.178,
-                    "pattern-detection": 0.189,
-                },
-                "violations_detected": False,
+    mock_response_no_violation = Response(
+        json={
+            "violations_detected": False,
+            "deputies": {
+                "jailbreak": False,
+                "custom-policies": False,
+                "sexual": False,
+                "hate": False,
+                "illegality": False,
+                "violence": False,
+                "pattern-detection": False,
             },
-            status_code=200,
-            request=Request(
-                method="POST", url="https://server.lasso.security/gateway/v1/chat"
-            ),
+            "deputies_predictions": {
+                "jailbreak": 0.123,
+                "custom-policies": 0.234,
+                "sexual": 0.145,
+                "hate": 0.156,
+                "illegality": 0.167,
+                "violence": 0.178,
+                "pattern-detection": 0.189,
+            },
+            "findings": {},
+        },
+        status_code=200,
+        request=Request(
+            method="POST", url="https://server.lasso.security/gateway/v2/classify"
         ),
+    )
+    mock_response_no_violation.raise_for_status = lambda: None
+
+    with patch.object(
+        lasso_guardrail.async_handler, "post", return_value=mock_response_no_violation
     ):
         result = await lasso_guardrail.async_pre_call_hook(
             data=data,
@@ -231,9 +237,8 @@ async def test_api_error_handling():
     }
 
     # Test handling of connection error
-    with patch(
-        "litellm.llms.custom_httpx.http_handler.AsyncHTTPHandler.post",
-        side_effect=Exception("Connection error"),
+    with patch.object(
+        lasso_guardrail.async_handler, "post", side_effect=Exception("Connection error")
     ):
         # Expect the guardrail to raise a LassoGuardrailAPIError
         with pytest.raises(LassoGuardrailAPIError) as excinfo:
@@ -249,9 +254,8 @@ async def test_api_error_handling():
     assert "Connection error" in str(excinfo.value)
 
     # Test with a different error message
-    with patch(
-        "litellm.llms.custom_httpx.http_handler.AsyncHTTPHandler.post",
-        side_effect=Exception("API timeout"),
+    with patch.object(
+        lasso_guardrail.async_handler, "post", side_effect=Exception("API timeout")
     ):
         # Expect the guardrail to raise a LassoGuardrailAPIError
         with pytest.raises(LassoGuardrailAPIError) as excinfo:

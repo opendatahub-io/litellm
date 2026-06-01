@@ -1,10 +1,17 @@
 from enum import Enum
-from typing import Optional, TypedDict
+from typing import Optional
+
+from typing_extensions import TypedDict
+
+# Request.state key for programmatic pass-through callers (e.g. Bedrock proxy) that attach
+# JSON without a FastAPI `custom_body` parameter (which would consume the HTTP body).
+LITELLM_PASS_THROUGH_CUSTOM_BODY_STATE_KEY = "litellm_pass_through_custom_body"
 
 
 class EndpointType(str, Enum):
     VERTEX_AI = "vertex-ai"
     ANTHROPIC = "anthropic"
+    OPENAI = "openai"
     GENERIC = "generic"
 
 

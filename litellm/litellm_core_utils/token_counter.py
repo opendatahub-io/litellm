@@ -3,7 +3,17 @@
 import base64
 import io
 import struct
-from typing import Callable, List, Literal, Optional, Tuple, Union, cast
+from typing import (
+    Any,
+    Callable,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Tuple,
+    Union,
+    cast,
+)
 
 import tiktoken
 
@@ -13,6 +23,7 @@ from litellm.constants import (
     DEFAULT_IMAGE_HEIGHT,
     DEFAULT_IMAGE_TOKEN_COUNT,
     DEFAULT_IMAGE_WIDTH,
+    MAX_IMAGE_URL_DOWNLOAD_SIZE_MB,
     MAX_LONG_SIDE_FOR_IMAGE_HIGH_RES,
     MAX_SHORT_SIDE_FOR_IMAGE_HIGH_RES,
     MAX_TILE_HEIGHT,
@@ -20,6 +31,11 @@ from litellm.constants import (
 )
 from litellm.litellm_core_utils.default_encoding import encoding as default_encoding
 from litellm.llms.custom_httpx.http_handler import _get_httpx_client
+from litellm.litellm_core_utils.url_utils import safe_get
+from litellm.types.llms.anthropic import (
+    AnthropicMessagesToolResultParam,
+    AnthropicMessagesToolUseParam,
+)
 from litellm.types.llms.openai import (
     AllMessageValues,
     ChatCompletionNamedToolChoiceParam,
@@ -196,13 +212,22 @@ def get_image_dimensions(
         Tuple[int, int]: The width and height of the image.
     """
     img_data = None
-    try:
-        # Try to open as URL
-        client = _get_httpx_client()
-        response = client.get(data)
-        img_data = response.read()
-    except Exception:
-        # If not URL, assume it's base64
+    if data.startswith(("http://", "https://")):
+        try:
+            client = _get_httpx_client()
+            response = safe_get(client, data)
+            max_bytes = int(MAX_IMAGE_URL_DOWNLOAD_SIZE_MB * 1024 * 1024)
+            content_length = response.headers.get("Content-Length")
+            if content_length is not None and int(content_length) > max_bytes:
+                pass  # skip download; img_data stays None
+            else:
+                body = response.read()
+                if len(body) <= max_bytes:
+                    img_data = body
+        except Exception:
+            pass
+    if img_data is None:
+        # Not a URL or fetch failed — assume base64
         _header, encoded = data.split(",", 1)
         img_data = base64.b64decode(encoded)
 
@@ -552,6 +577,131 @@ def _fix_model_name(model: str) -> str:
         return "gpt-3.5-turbo"
 
 
+def _count_image_tokens(
+    image_url: Any,
+    use_default_image_token_count: bool,
+) -> int:
+    """
+    Count tokens for an image_url content block.
+
+    Args:
+        image_url: The image URL data - can be a string URL or dict with 'url' and 'detail'
+        use_default_image_token_count: Whether to use default image token counts
+
+    Returns:
+        int: Number of tokens for the image
+
+    Raises:
+        ValueError: If image_url is invalid type or detail value is invalid
+    """
+    if isinstance(image_url, dict):
+        detail = image_url.get("detail", "auto")
+        if detail not in ["low", "high", "auto"]:
+            raise ValueError(
+                f"Invalid detail value: {detail}. Expected 'low', 'high', or 'auto'."
+            )
+        url = image_url.get("url")
+        if not url:
+            raise ValueError("Missing required key 'url' in image_url dict.")
+        return calculate_img_tokens(
+            data=url,
+            mode=detail,  # type: ignore
+            use_default_image_token_count=use_default_image_token_count,
+        )
+    elif isinstance(image_url, str):
+        if not image_url.strip():
+            raise ValueError("Empty image_url string is not valid.")
+        return calculate_img_tokens(
+            data=image_url,
+            mode="auto",
+            use_default_image_token_count=use_default_image_token_count,
+        )
+    else:
+        raise ValueError(
+            f"Invalid image_url type: {type(image_url).__name__}. "
+            "Expected str or dict with 'url' field."
+        )
+
+
+def _validate_anthropic_content(content: Mapping[str, Any]) -> type:
+    """
+    Validate and determine which Anthropic TypedDict applies.
+
+    Returns the corresponding TypedDict class if recognized, otherwise raises.
+    """
+    content_type = content.get("type")
+    if not content_type:
+        raise ValueError("Anthropic content missing required field: 'type'")
+
+    mapping = {
+        "tool_use": AnthropicMessagesToolUseParam,
+        "tool_result": AnthropicMessagesToolResultParam,
+    }
+
+    expected_cls = mapping.get(content_type)
+    if expected_cls is None:
+        raise ValueError(f"Unknown Anthropic content type: '{content_type}'")
+
+    missing = [
+        k for k in getattr(expected_cls, "__required_keys__", set()) if k not in content
+    ]
+    if missing:
+        raise ValueError(
+            f"Missing required fields in {content_type} block: {', '.join(missing)}"
+        )
+
+    return expected_cls
+
+
+def _count_anthropic_content(
+    content: Mapping[str, Any],
+    count_function: TokenCounterFunction,
+    use_default_image_token_count: bool,
+    default_token_count: Optional[int],
+) -> int:
+    """
+    Count tokens in Anthropic-specific content blocks (tool_use, tool_result, etc.).
+
+    Uses TypedDict definitions from litellm.types.llms.anthropic to determine
+    what fields to count and how to handle nested structures.
+
+    Dynamically infers which fields to count based on the TypedDict definition,
+    avoiding hardcoded field names.
+    """
+    typeddict_cls = _validate_anthropic_content(content)
+    type_hints = getattr(typeddict_cls, "__annotations__", {})
+    tokens = 0
+
+    # Fields to skip (metadata/identifiers that don't contribute to prompt tokens)
+    skip_fields = {"type", "id", "tool_use_id", "cache_control", "is_error"}
+
+    # Iterate over all fields defined in the TypedDict
+    for field_name, field_type in type_hints.items():
+        if field_name in skip_fields:
+            continue
+
+        field_value = content.get(field_name)
+        if field_value is None:
+            continue
+        try:
+            if isinstance(field_value, str):
+                tokens += count_function(field_value)
+            elif isinstance(field_value, list):
+                tokens += _count_content_list(
+                    count_function,
+                    field_value,  # type: ignore
+                    use_default_image_token_count,
+                    default_token_count,
+                )
+            elif isinstance(field_value, dict):
+                tokens += count_function(str(field_value))
+        except Exception as e:
+            if default_token_count is not None:
+                return default_token_count
+            raise ValueError(f"Error counting field '{field_name}': {e}")
+    return tokens
+
+
 def _count_content_list(
     count_function: TokenCounterFunction,
     content_list: OpenAIMessageContent,
@@ -559,7 +709,7 @@ def _count_content_list(
     default_token_count: Optional[int],
 ) -> int:
     """
-    Get the number of tokens from a list of content.
+    Recursively count tokens from a list of content blocks.
     """
     try:
         num_tokens = 0
@@ -567,42 +717,42 @@ def _count_content_list(
             if isinstance(c, str):
                 num_tokens += count_function(c)
             elif c["type"] == "text":
-                num_tokens += count_function(c["text"])
+                num_tokens += count_function(str(c.get("text", "")))
             elif c["type"] == "image_url":
-                if isinstance(c["image_url"], dict):
-                    image_url_dict = c["image_url"]
-                    detail = image_url_dict.get("detail", "auto")
-                    if detail not in ["low", "high", "auto"]:
-                        raise ValueError(
-                            f"Invalid detail value: {detail}. Expected 'low', 'high', or 'auto'."
-                        )
-                    url = image_url_dict.get("url")
-                    num_tokens += calculate_img_tokens(
-                        data=url,
-                        mode=detail,  # type: ignore
-                        use_default_image_token_count=use_default_image_token_count,
-                    )
-                elif isinstance(c["image_url"], str):
-                    image_url_str = c["image_url"]
-                    num_tokens += calculate_img_tokens(
-                        data=image_url_str,
-                        mode="auto",
-                        use_default_image_token_count=use_default_image_token_count,
-                    )
-                else:
-                    raise ValueError(
-                        f"Invalid image_url type: {type(c['image_url'])}. Expected str or dict."
-                    )
+                image_url = c.get("image_url")
+                num_tokens += _count_image_tokens(
+                    image_url, use_default_image_token_count
+                )
+            elif c["type"] in ("tool_use", "tool_result"):
+                num_tokens += _count_anthropic_content(
+                    c,
+                    count_function,
+                    use_default_image_token_count,
+                    default_token_count,
+                )
+            elif c["type"] == "thinking":
+                # Claude extended thinking content block
+                # Count the thinking text and skip signature (opaque signature blob)
+                thinking_text = str(c.get("thinking", ""))
+                if thinking_text:
+                    num_tokens += count_function(thinking_text)
             else:
+                content_type = (
+                    c.get("type", type(c).__name__)
+                    if isinstance(c, dict)
+                    else type(c).__name__
+                )
                 raise ValueError(
-                    f"Invalid content type: {type(c)}. Expected str or dict."
+                    f"Invalid content item type: {content_type}. "
+                    f"Expected str or dict with 'type' field (text, image_url, tool_use, tool_result, thinking)."
                 )
         return num_tokens
     except Exception as e:
         if default_token_count is not None:
             return default_token_count
         raise ValueError(
-            f"Error getting number of tokens from content list: {e}, default_token_count={default_token_count}"
+            f"Error getting number of tokens from content list: {e}, "
+            f"default_token_count={default_token_count}"
         )
 
 

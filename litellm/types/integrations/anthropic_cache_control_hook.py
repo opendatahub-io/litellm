@@ -1,4 +1,6 @@
-from typing import Literal, Optional, TypedDict, Union
+from typing import Literal, Optional, Union
+
+from typing_extensions import TypedDict
 
 from litellm.types.llms.openai import ChatCompletionCachedContent
 
@@ -14,4 +16,13 @@ class CacheControlMessageInjectionPoint(TypedDict):
     control: Optional[ChatCompletionCachedContent]
 
 
-CacheControlInjectionPoint = CacheControlMessageInjectionPoint
+class CacheControlToolConfigInjectionPoint(TypedDict):
+    """Type for tool_config-level injection points (Bedrock)."""
+
+    location: Literal["tool_config"]
+
+
+CacheControlInjectionPoint = Union[
+    CacheControlMessageInjectionPoint,
+    CacheControlToolConfigInjectionPoint,
+]

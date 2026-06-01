@@ -2,11 +2,11 @@
 ## Translates OpenAI call to Anthropic `/v1/messages` format
 import json
 import traceback
-import uuid
 from collections import deque
-from typing import TYPE_CHECKING, Any, AsyncIterator, Iterator, Literal, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Iterator, Literal, Optional
 
 from litellm import verbose_logger
+from litellm._uuid import uuid
 from litellm.types.llms.anthropic import UsageDelta
 from litellm.types.utils import AdapterCompletionStreamWrapper
 
@@ -28,61 +28,91 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
         TextBlock,
     )
 
-    def __init__(self, completion_stream: Any, model: str):
-        super().__init__(completion_stream)
-        self.model = model
-
     sent_first_chunk: bool = False
     sent_content_block_start: bool = False
     sent_content_block_finish: bool = False
-    current_content_block_type: Literal["text", "tool_use"] = "text"
+    current_content_block_type: Literal["text", "tool_use", "thinking"] = "text"
     sent_last_message: bool = False
     holding_chunk: Optional[Any] = None
     holding_stop_reason_chunk: Optional[Any] = None
+    queued_usage_chunk: bool = False
     current_content_block_index: int = 0
     current_content_block_start: ContentBlockContentBlockDict = TextBlock(
         type="text",
         text="",
     )
-    pending_new_content_block: bool = False
     chunk_queue: deque = deque()  # Queue for buffering multiple chunks
+
+    def __init__(
+        self,
+        completion_stream: Any,
+        model: str,
+        tool_name_mapping: Optional[Dict[str, str]] = None,
+    ):
+        super().__init__(completion_stream)
+        self.model = model
+        # Mapping of truncated tool names to original names (for OpenAI's 64-char limit)
+        self.tool_name_mapping = tool_name_mapping or {}
+
+    def _create_initial_usage_delta(self) -> UsageDelta:
+        """
+        Create the initial UsageDelta for the message_start event.
+
+        Initializes cache token fields (cache_creation_input_tokens, cache_read_input_tokens)
+        to 0 to indicate to clients (like Claude Code) that prompt caching is supported.
+
+        The actual cache token values will be provided in the message_delta event at the
+        end of the stream, since Bedrock Converse API only returns usage data in the final
+        response chunk.
+
+        Returns:
+            UsageDelta with all token counts initialized to 0.
+        """
+        return UsageDelta(
+            input_tokens=0,
+            output_tokens=0,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
 
     def __next__(self):
         from .transformation import LiteLLMAnthropicMessagesAdapter
 
         try:
+            # Always return queued chunks first
+            if self.chunk_queue:
+                return self.chunk_queue.popleft()
+
+            # Queue initial chunks if not sent yet
             if self.sent_first_chunk is False:
                 self.sent_first_chunk = True
-                return {
-                    "type": "message_start",
-                    "message": {
-                        "id": "msg_{}".format(uuid.uuid4()),
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [],
-                        "model": self.model,
-                        "stop_reason": None,
-                        "stop_sequence": None,
-                        "usage": UsageDelta(input_tokens=0, output_tokens=0),
-                    },
-                }
+                self.chunk_queue.append(
+                    {
+                        "type": "message_start",
+                        "message": {
+                            "id": "msg_{}".format(uuid.uuid4()),
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [],
+                            "model": self.model,
+                            "stop_reason": None,
+                            "stop_sequence": None,
+                            "usage": self._create_initial_usage_delta(),
+                        },
+                    }
+                )
+                return self.chunk_queue.popleft()
+
             if self.sent_content_block_start is False:
                 self.sent_content_block_start = True
-                return {
-                    "type": "content_block_start",
-                    "index": self.current_content_block_index,
-                    "content_block": {"type": "text", "text": ""},
-                }
-
-            # Handle pending new content block start
-            if self.pending_new_content_block:
-                self.pending_new_content_block = False
-                self.sent_content_block_finish = False  # Reset for new block
-                return {
-                    "type": "content_block_start",
-                    "index": self.current_content_block_index,
-                    "content_block": self.current_content_block_start,
-                }
+                self.chunk_queue.append(
+                    {
+                        "type": "content_block_start",
+                        "index": self.current_content_block_index,
+                        "content_block": {"type": "text", "text": ""},
+                    }
+                )
+                return self.chunk_queue.popleft()
 
             for chunk in self.completion_stream:
                 if chunk == "None" or chunk is None:
@@ -97,45 +127,84 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
                     current_content_block_index=self.current_content_block_index,
                 )
 
-                # Check if we need to start a new content block
-                # This is where you'd add your logic to detect when a new content block should start
-                # For example, if the chunk indicates a tool call or different content type
-
                 if should_start_new_block and not self.sent_content_block_finish:
-                    # End current content block and prepare for new one
-                    self.holding_chunk = processed_chunk
-                    self.sent_content_block_finish = True
-                    self.pending_new_content_block = True
-                    return {
-                        "type": "content_block_stop",
-                        "index": max(self.current_content_block_index - 1, 0),
-                    }
+                    # Queue the sequence: content_block_stop -> content_block_start
+                    # For text blocks the trigger chunk is not emitted as a separate
+                    # delta because content_block_start carries the information.
+                    # For tool_use blocks we must also emit the trigger chunk's delta
+                    # when it carries input_json_delta data, because some providers
+                    # (e.g. xAI, Gemini) include tool arguments in the same streaming
+                    # chunk as the function name/id.
+
+                    # 1. Stop current content block
+                    self.chunk_queue.append(
+                        {
+                            "type": "content_block_stop",
+                            "index": max(self.current_content_block_index - 1, 0),
+                        }
+                    )
+
+                    # 2. Start new content block
+                    self.chunk_queue.append(
+                        {
+                            "type": "content_block_start",
+                            "index": self.current_content_block_index,
+                            "content_block": self.current_content_block_start,
+                        }
+                    )
+
+                    # 3. If the trigger chunk carries tool argument data, queue it
+                    # so the input_json_delta is not silently dropped.
+                    if (
+                        processed_chunk.get("type") == "content_block_delta"
+                        and isinstance(processed_chunk.get("delta"), dict)
+                        and processed_chunk["delta"].get("type") == "input_json_delta"
+                        and processed_chunk["delta"].get("partial_json")
+                    ):
+                        self.chunk_queue.append(processed_chunk)
+
+                    self.sent_content_block_finish = False
+                    return self.chunk_queue.popleft()
 
                 if (
                     processed_chunk["type"] == "message_delta"
                     and self.sent_content_block_finish is False
                 ):
-                    self.holding_chunk = processed_chunk
+                    # Queue both the content_block_stop and the message_delta
+                    self.chunk_queue.append(
+                        {
+                            "type": "content_block_stop",
+                            "index": self.current_content_block_index,
+                        }
+                    )
                     self.sent_content_block_finish = True
-                    return {
-                        "type": "content_block_stop",
-                        "index": self.current_content_block_index,
-                    }
+                    self.chunk_queue.append(processed_chunk)
+                    return self.chunk_queue.popleft()
                 elif self.holding_chunk is not None:
-                    return_chunk = self.holding_chunk
-                    self.holding_chunk = processed_chunk
-                    return return_chunk
+                    self.chunk_queue.append(self.holding_chunk)
+                    self.chunk_queue.append(processed_chunk)
+                    self.holding_chunk = None
+                    return self.chunk_queue.popleft()
                 else:
-                    return processed_chunk
+                    self.chunk_queue.append(processed_chunk)
+                    return self.chunk_queue.popleft()
+
+            # Handle any remaining held chunks after stream ends
             if self.holding_chunk is not None:
-                return_chunk = self.holding_chunk
+                self.chunk_queue.append(self.holding_chunk)
                 self.holding_chunk = None
-                return return_chunk
-            if self.sent_last_message is False:
+
+            if not self.sent_last_message:
                 self.sent_last_message = True
-                return {"type": "message_stop"}
+                self.chunk_queue.append({"type": "message_stop"})
+
+            if self.chunk_queue:
+                return self.chunk_queue.popleft()
+
             raise StopIteration
         except StopIteration:
+            if self.chunk_queue:
+                return self.chunk_queue.popleft()
             if self.sent_last_message is False:
                 self.sent_last_message = True
                 return {"type": "message_stop"}
@@ -168,7 +237,7 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
                             "model": self.model,
                             "stop_reason": None,
                             "stop_sequence": None,
-                            "usage": UsageDelta(input_tokens=0, output_tokens=0),
+                            "usage": self._create_initial_usage_delta(),
                         },
                     }
                 )
@@ -210,84 +279,128 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
                         merged_chunk["delta"] = {}
 
                     # Add usage to the held chunk
-                    merged_chunk["usage"] = {
-                        "input_tokens": chunk.usage.prompt_tokens or 0,
+                    uncached_input_tokens = chunk.usage.prompt_tokens or 0
+                    if (
+                        hasattr(chunk.usage, "prompt_tokens_details")
+                        and chunk.usage.prompt_tokens_details
+                    ):
+                        cached_tokens = (
+                            getattr(
+                                chunk.usage.prompt_tokens_details, "cached_tokens", 0
+                            )
+                            or 0
+                        )
+                        uncached_input_tokens -= cached_tokens
+
+                    usage_dict: UsageDelta = {
+                        "input_tokens": uncached_input_tokens,
                         "output_tokens": chunk.usage.completion_tokens or 0,
                     }
+                    # Add cache tokens if available (for prompt caching support)
+                    if (
+                        hasattr(chunk.usage, "_cache_creation_input_tokens")
+                        and chunk.usage._cache_creation_input_tokens > 0
+                    ):
+                        usage_dict["cache_creation_input_tokens"] = (
+                            chunk.usage._cache_creation_input_tokens
+                        )
+                    if (
+                        hasattr(chunk.usage, "_cache_read_input_tokens")
+                        and chunk.usage._cache_read_input_tokens > 0
+                    ):
+                        usage_dict["cache_read_input_tokens"] = (
+                            chunk.usage._cache_read_input_tokens
+                        )
+                    merged_chunk["usage"] = usage_dict
 
                     # Queue the merged chunk and reset
                     self.chunk_queue.append(merged_chunk)
+                    self.queued_usage_chunk = True
                     self.holding_stop_reason_chunk = None
                     return self.chunk_queue.popleft()
 
                 # Check if this processed chunk has a stop_reason - hold it for next chunk
 
-                if should_start_new_block and not self.sent_content_block_finish:
-                    # Queue the sequence: content_block_stop -> content_block_start -> current_chunk
+                if not self.queued_usage_chunk:
+                    if should_start_new_block and not self.sent_content_block_finish:
+                        # Queue the sequence: content_block_stop -> content_block_start
+                        # For text blocks the trigger chunk is not emitted as a separate
+                        # delta because content_block_start carries the information.
+                        # For tool_use blocks we must also emit the trigger chunk's delta
+                        # when it carries input_json_delta data, because some providers
+                        # (e.g. xAI, Gemini) include tool arguments in the same streaming
+                        # chunk as the function name/id.
 
-                    # 1. Stop current content block
-                    self.chunk_queue.append(
-                        {
-                            "type": "content_block_stop",
-                            "index": max(self.current_content_block_index - 1, 0),
-                        }
-                    )
+                        # 1. Stop current content block
+                        self.chunk_queue.append(
+                            {
+                                "type": "content_block_stop",
+                                "index": max(self.current_content_block_index - 1, 0),
+                            }
+                        )
+                        self.chunk_queue.append(
+                            {
+                                "type": "content_block_start",
+                                "index": self.current_content_block_index,
+                                "content_block": self.current_content_block_start,
+                            }
+                        )
 
-                    # 2. Start new content block
-                    self.chunk_queue.append(
-                        {
-                            "type": "content_block_start",
-                            "index": self.current_content_block_index,
-                            "content_block": self.current_content_block_start,
-                        }
-                    )
+                        # 3. If the trigger chunk carries tool argument data, queue it
+                        # so the input_json_delta is not silently dropped.
+                        if (
+                            processed_chunk.get("type") == "content_block_delta"
+                            and isinstance(processed_chunk.get("delta"), dict)
+                            and processed_chunk["delta"].get("type")
+                            == "input_json_delta"
+                            and processed_chunk["delta"].get("partial_json")
+                        ):
+                            self.chunk_queue.append(processed_chunk)
 
-                    # 3. Queue the current chunk (don't lose it!)
-                    self.chunk_queue.append(processed_chunk)
+                        # Reset state for new block
+                        self.sent_content_block_finish = False
+                        return self.chunk_queue.popleft()
 
-                    # Reset state for new block
-                    self.sent_content_block_finish = False
-
-                    # Return the first queued item
-                    return self.chunk_queue.popleft()
-
-                if (
-                    processed_chunk["type"] == "message_delta"
-                    and self.sent_content_block_finish is False
-                ):
-                    # Queue both the content_block_stop and the holding chunk
-                    self.chunk_queue.append(
-                        {
-                            "type": "content_block_stop",
-                            "index": self.current_content_block_index,
-                        }
-                    )
-                    self.sent_content_block_finish = True
-                    if processed_chunk.get("delta", {}).get("stop_reason") is not None:
-
-                        self.holding_stop_reason_chunk = processed_chunk
-                    else:
+                    if (
+                        processed_chunk["type"] == "message_delta"
+                        and self.sent_content_block_finish is False
+                    ):
+                        # Queue both the content_block_stop and the holding chunk
+                        self.chunk_queue.append(
+                            {
+                                "type": "content_block_stop",
+                                "index": self.current_content_block_index,
+                            }
+                        )
+                        self.sent_content_block_finish = True
+                        if (
+                            processed_chunk.get("delta", {}).get("stop_reason")
+                            is not None
+                        ):
+                            self.holding_stop_reason_chunk = processed_chunk
+                        else:
+                            self.chunk_queue.append(processed_chunk)
+                        return self.chunk_queue.popleft()
+                    elif self.holding_chunk is not None:
+                        # Queue both chunks
+                        self.chunk_queue.append(self.holding_chunk)
                         self.chunk_queue.append(processed_chunk)
-                    return self.chunk_queue.popleft()
-                elif self.holding_chunk is not None:
-                    # Queue both chunks
-                    self.chunk_queue.append(self.holding_chunk)
-                    self.chunk_queue.append(processed_chunk)
-                    self.holding_chunk = None
-                    return self.chunk_queue.popleft()
-                else:
-                    # Queue the current chunk
-                    self.chunk_queue.append(processed_chunk)
-                    return self.chunk_queue.popleft()
+                        self.holding_chunk = None
+                        return self.chunk_queue.popleft()
+                    else:
+                        # Queue the current chunk
+                        self.chunk_queue.append(processed_chunk)
+                        return self.chunk_queue.popleft()
 
             # Handle any remaining held chunks after stream ends
-            if self.holding_stop_reason_chunk is not None:
-                self.chunk_queue.append(self.holding_stop_reason_chunk)
-                self.holding_stop_reason_chunk = None
+            if not self.queued_usage_chunk:
+                if self.holding_stop_reason_chunk is not None:
+                    self.chunk_queue.append(self.holding_stop_reason_chunk)
+                    self.holding_stop_reason_chunk = None
 
-            if self.holding_chunk is not None:
-                self.chunk_queue.append(self.holding_chunk)
-                self.holding_chunk = None
+                if self.holding_chunk is not None:
+                    self.chunk_queue.append(self.holding_chunk)
+                    self.holding_chunk = None
 
             if not self.sent_last_message:
                 self.sent_last_message = True
@@ -368,9 +481,38 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
             choices=chunk.choices  # type: ignore
         )
 
+        # Restore original tool name if it was truncated for OpenAI's 64-char limit
+        if block_type == "tool_use":
+            # Type narrowing: content_block_start is ToolUseBlock when block_type is "tool_use"
+            from typing import cast
+
+            from litellm.types.llms.anthropic import ToolUseBlock
+
+            tool_block = cast(ToolUseBlock, content_block_start)
+
+            if tool_block.get("name"):
+                truncated_name = tool_block["name"]
+                original_name = self.tool_name_mapping.get(
+                    truncated_name, truncated_name
+                )
+                tool_block["name"] = original_name
+
         if block_type != self.current_content_block_type:
             self.current_content_block_type = block_type
             self.current_content_block_start = content_block_start
             return True
+
+        # For parallel tool calls, we'll necessarily have a new content block
+        # if we get a function name since it signals a new tool call
+        if block_type == "tool_use":
+            from typing import cast
+
+            from litellm.types.llms.anthropic import ToolUseBlock
+
+            tool_block = cast(ToolUseBlock, content_block_start)
+            if tool_block.get("name"):
+                self.current_content_block_type = block_type
+                self.current_content_block_start = content_block_start
+                return True
 
         return False

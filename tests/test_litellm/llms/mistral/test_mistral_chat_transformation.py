@@ -11,7 +11,10 @@ sys.path.insert(
     0, os.path.abspath("../..")
 )  # Adds the parent directory to the system path
 
-from litellm.llms.mistral.chat.transformation import MistralConfig
+from litellm.llms.mistral.chat.transformation import (
+    MistralChatResponseIterator,
+    MistralConfig,
+)
 from litellm.types.utils import ModelResponse
 
 
@@ -361,6 +364,45 @@ class TestMistralReasoningSupport:
         assert "_add_reasoning_prompt" not in result
 
 
+def test_mistral_streaming_chunk_preserves_thinking_blocks():
+    """Ensure streaming chunks keep magistral reasoning content."""
+    iterator = MistralChatResponseIterator(
+        streaming_response=iter([]), sync_stream=True, json_mode=False
+    )
+
+    streamed_chunk = {
+        "id": "chunk-1",
+        "object": "chat.completion.chunk",
+        "created": 123456,
+        "model": "magistral-medium-2509",
+        "choices": [
+            {
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": [{"type": "text", "text": "Working it out."}],
+                        },
+                        {"type": "text", "text": " Hello"},
+                    ],
+                },
+                "finish_reason": None,
+            }
+        ],
+    }
+
+    parsed_chunk = iterator.chunk_parser(streamed_chunk)
+
+    delta = parsed_chunk.choices[0].delta
+    assert delta.thinking_blocks is not None
+    assert delta.thinking_blocks[0]["thinking"] == "Working it out."
+    assert delta.thinking_blocks[0]["signature"] == "mistral"
+    assert delta.reasoning_content == "Working it out."
+    assert delta.content == " Hello"
+
+
 class TestMistralNameHandling:
     """Test suite for Mistral name handling in messages."""
 
@@ -607,9 +649,10 @@ class TestMistralEmptyContentHandling:
         message = {"role": "assistant", "content": "Hello"}
         assert MistralConfig._is_empty_assistant_message(message) is False
 
+
 class TestMistralFileHandling:
     """Test suite for Mistral file handling functionality."""
-    
+
     def test_handle_file_message_with_file_id(self):
         """Test that file messages with file_id are handled correctly."""
         mistral_config = MistralConfig()
@@ -618,8 +661,8 @@ class TestMistralFileHandling:
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "Please review this file."},
-                    {"type": "file", "file": {"file_id": "file-12345"}}
-                ]
+                    {"type": "file", "file": {"file_id": "file-12345"}},
+                ],
             }
         ]
         casted_message = cast(list[AllMessageValues], messages)
@@ -632,7 +675,7 @@ class TestMistralFileHandling:
         # Check that file type is preserved
         assert result[0]["content"][1]["type"] == "file"
         # Check that file_id is modified to match Mistral's expected format
-        assert result[0]["content"][1]["file_id"] == "file-12345" # type: ignore
+        assert result[0]["content"][1]["file_id"] == "file-12345"  # type: ignore
 
     def test_handle_file_message_without_file_id(self):
         """Test that file messages without file_id are ignored."""
@@ -640,9 +683,7 @@ class TestMistralFileHandling:
         messages = [
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": "Please review this file."}
-                ]
+                "content": [{"type": "text", "text": "Please review this file."}],
             }
         ]
         casted_message = cast(list[AllMessageValues], messages)
@@ -661,8 +702,8 @@ class TestMistralFileHandling:
                 "content": [
                     {"type": "text", "text": "Please review these files."},
                     {"type": "file", "file": {"file_id": "file-12345"}},
-                    {"type": "file", "file": {"file_id": "file-67890"}}
-                ]
+                    {"type": "file", "file": {"file_id": "file-67890"}},
+                ],
             }
         ]
         casted_message = cast(list[AllMessageValues], messages)

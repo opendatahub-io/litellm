@@ -4,24 +4,20 @@ litellm.Router Types - includes RouterConfig, UpdateRouterConfig, ModelInfo etc
 
 import datetime
 import enum
-import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union, get_type_hints
 
 import httpx
-from httpx import AsyncClient, Client
-from openai import AsyncAzureOpenAI, AsyncOpenAI, AzureOpenAI, OpenAI
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import Required, TypedDict
 
-from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
+from litellm._uuid import uuid
 
-from ..exceptions import RateLimitError
 from .completion import CompletionRequest
 from .embedding import EmbeddingRequest
 from .llms.openai import OpenAIFileObject
-from .llms.vertex_ai import VERTEX_CREDENTIALS_TYPES
-from .utils import ModelResponse, ProviderSpecificModelInfo
+from .search import SearchProvider
+from .utils import CustomPricingLiteLLMParams, ModelResponse
 
 
 class ConfigurableClientsideParamsCustomAuth(TypedDict):
@@ -38,6 +34,19 @@ class ModelConfig(BaseModel):
     litellm_params: Union[CompletionRequest, EmbeddingRequest]
     tpm: int
     rpm: int
+
+    model_config = ConfigDict(protected_namespaces=())
+
+
+class RoutingGroup(BaseModel):
+    """
+    A group of models that share a routing strategy.
+    """
+
+    group_name: str
+    models: List[str]
+    routing_strategy: str
+    routing_strategy_args: Optional[dict] = None
 
     model_config = ConfigDict(protected_namespaces=())
 
@@ -69,6 +78,7 @@ class RouterConfig(BaseModel):
         "usage-based-routing",
         "latency-based-routing",
     ] = "simple-shuffle"
+    routing_groups: Optional[List[RoutingGroup]] = None
 
     model_config = ConfigDict(protected_namespaces=())
 
@@ -80,7 +90,9 @@ class UpdateRouterConfig(BaseModel):
 
     routing_strategy_args: Optional[dict] = None
     routing_strategy: Optional[str] = None
+    routing_groups: Optional[List[RoutingGroup]] = None
     model_group_retry_policy: Optional[dict] = None
+    model_group_affinity_config: Optional[Dict[str, List[str]]] = None
     allowed_fails: Optional[int] = None
     cooldown_time: Optional[float] = None
     num_retries: Optional[int] = None
@@ -162,18 +174,12 @@ class CredentialLiteLLMParams(BaseModel):
     aws_access_key_id: Optional[str] = None
     aws_secret_access_key: Optional[str] = None
     aws_region_name: Optional[str] = None
+    aws_bedrock_runtime_endpoint: Optional[str] = None
     ## IBM WATSONX ##
     watsonx_region_name: Optional[str] = None
 
 
-class CustomPricingLiteLLMParams(BaseModel):
-    ## CUSTOM PRICING ##
-    input_cost_per_token: Optional[float] = None
-    output_cost_per_token: Optional[float] = None
-    input_cost_per_second: Optional[float] = None
-    output_cost_per_second: Optional[float] = None
-    input_cost_per_pixel: Optional[float] = None
-    output_cost_per_pixel: Optional[float] = None
+_RESERVED_INIT_KEYS = frozenset({"self", "params", "__class__"})
 
 
 class GenericLiteLLMParams(CredentialLiteLLMParams, CustomPricingLiteLLMParams):
@@ -200,15 +206,26 @@ class GenericLiteLLMParams(CredentialLiteLLMParams, CustomPricingLiteLLMParams):
 
     max_file_size_mb: Optional[float] = None
 
+    # Proxy-wide default rate limits applied to any API key using this deployment
+    # when the key does not have a model-specific tpm/rpm limit configured.
+    default_api_key_tpm_limit: Optional[int] = None
+    default_api_key_rpm_limit: Optional[int] = None
+
     # Deployment budgets
     max_budget: Optional[float] = None
     budget_duration: Optional[str] = None
     use_in_pass_through: Optional[bool] = False
     use_litellm_proxy: Optional[bool] = False
+    use_chat_completions_api: Optional[bool] = None
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
     merge_reasoning_content_in_choices: Optional[bool] = False
     model_info: Optional[Dict] = None
     mock_response: Optional[Union[str, ModelResponse, Exception, Any]] = None
+
+    # tag-based routing
+    tags: Optional[List[str]] = None
+    # regex patterns matched against request headers for tag routing
+    tag_regex: Optional[List[str]] = None
 
     # auto-router params
     auto_router_config_path: Optional[str] = None
@@ -216,69 +233,43 @@ class GenericLiteLLMParams(CredentialLiteLLMParams, CustomPricingLiteLLMParams):
     auto_router_default_model: Optional[str] = None
     auto_router_embedding_model: Optional[str] = None
 
-    def __init__(
-        self,
-        custom_llm_provider: Optional[str] = None,
-        max_retries: Optional[Union[int, str]] = None,
-        tpm: Optional[int] = None,
-        rpm: Optional[int] = None,
-        api_key: Optional[str] = None,
-        api_base: Optional[str] = None,
-        api_version: Optional[str] = None,
-        timeout: Optional[Union[float, str]] = None,  # if str, pass in as os.environ/
-        stream_timeout: Optional[Union[float, str]] = (
-            None  # timeout when making stream=True calls, if str, pass in as os.environ/
-        ),
-        organization: Optional[str] = None,  # for openai orgs
-        ## LOGGING PARAMS ##
-        litellm_trace_id: Optional[str] = None,
-        ## UNIFIED PROJECT/REGION ##
-        region_name: Optional[str] = None,
-        ## VERTEX AI ##
-        vertex_project: Optional[str] = None,
-        vertex_location: Optional[str] = None,
-        vertex_credentials: Optional[VERTEX_CREDENTIALS_TYPES] = None,
-        ## AWS BEDROCK / SAGEMAKER ##
-        aws_access_key_id: Optional[str] = None,
-        aws_secret_access_key: Optional[str] = None,
-        aws_region_name: Optional[str] = None,
-        ## IBM WATSONX ##
-        watsonx_region_name: Optional[str] = None,
-        input_cost_per_token: Optional[float] = None,
-        output_cost_per_token: Optional[float] = None,
-        input_cost_per_second: Optional[float] = None,
-        output_cost_per_second: Optional[float] = None,
-        max_file_size_mb: Optional[float] = None,
-        # Deployment budgets
-        max_budget: Optional[float] = None,
-        budget_duration: Optional[str] = None,
-        # Pass through params
-        use_in_pass_through: Optional[bool] = False,
-        # Dynamic param to force using litellm proxy
-        use_litellm_proxy: Optional[bool] = False,
-        # This will merge the reasoning content in the choices
-        merge_reasoning_content_in_choices: Optional[bool] = False,
-        model_info: Optional[Dict] = None,
-        mock_response: Optional[Union[str, ModelResponse, Exception, Any]] = None,
-        # auto-router params
-        auto_router_config_path: Optional[str] = None,
-        auto_router_config: Optional[str] = None,
-        auto_router_default_model: Optional[str] = None,
-        auto_router_embedding_model: Optional[str] = None,
-        **params,
-    ):
-        args = locals()
-        args.pop("max_retries", None)
-        args.pop("self", None)
-        args.pop("params", None)
-        args.pop("__class__", None)
-        if max_retries is not None and isinstance(max_retries, str):
-            max_retries = int(max_retries)  # cast to int
-        # We need to keep max_retries in args since it's a parameter of GenericLiteLLMParams
-        args["max_retries"] = (
-            max_retries  # Put max_retries back in args after popping it
-        )
-        super().__init__(**args, **params)
+    # complexity-router params
+    complexity_router_config: Optional[Dict] = None
+    complexity_router_default_model: Optional[str] = None
+
+    # adaptive-router params
+    adaptive_router_default_model: Optional[str] = None
+    adaptive_router_config: Optional[Dict] = None
+    # quality-router params
+    quality_router_config: Optional[Dict] = None
+    quality_router_default_model: Optional[str] = None
+
+    # Batch/File API Params
+    s3_bucket_name: Optional[str] = None
+    s3_encryption_key_id: Optional[str] = None
+    gcs_bucket_name: Optional[str] = None
+
+    # Vector Store Params
+    vector_store_id: Optional[str] = None
+    milvus_text_field: Optional[str] = None
+    milvus_db_name: Optional[str] = None
+    milvus_partition_names: Optional[List[str]] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def preprocess_input_data(cls, data: Any) -> Any:
+        """
+        Pre-process input data before validation:
+        1. Filter out reserved Python keywords ('self', 'params', '__class__') to prevent
+           'got multiple values for argument' errors when user data contains these keys.
+        2. Convert max_retries from string to int if needed.
+        """
+        if isinstance(data, dict):
+            filtered = {k: v for k, v in data.items() if k not in _RESERVED_INIT_KEYS}
+            if "max_retries" in filtered and isinstance(filtered["max_retries"], str):
+                filtered["max_retries"] = int(filtered["max_retries"])
+            return filtered
+        return data
 
     def __contains__(self, key):
         # Define custom behavior for the 'in' operator
@@ -304,46 +295,6 @@ class LiteLLM_Params(GenericLiteLLMParams):
 
     model: str
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
-
-    def __init__(
-        self,
-        model: str,
-        custom_llm_provider: Optional[str] = None,
-        max_retries: Optional[Union[int, str]] = None,
-        tpm: Optional[int] = None,
-        rpm: Optional[int] = None,
-        api_key: Optional[str] = None,
-        api_base: Optional[str] = None,
-        api_version: Optional[str] = None,
-        timeout: Optional[Union[float, str]] = None,  # if str, pass in as os.environ/
-        stream_timeout: Optional[Union[float, str]] = (
-            None  # timeout when making stream=True calls, if str, pass in as os.environ/
-        ),
-        organization: Optional[str] = None,  # for openai orgs
-        ## VERTEX AI ##
-        vertex_project: Optional[str] = None,
-        vertex_location: Optional[str] = None,
-        ## AWS BEDROCK / SAGEMAKER ##
-        aws_access_key_id: Optional[str] = None,
-        aws_secret_access_key: Optional[str] = None,
-        aws_region_name: Optional[str] = None,
-        # OpenAI / Azure Whisper
-        # set a max-size of file that can be passed to litellm proxy
-        max_file_size_mb: Optional[float] = None,
-        # will use deployment on pass-through endpoints if True
-        use_in_pass_through: Optional[bool] = False,
-        use_litellm_proxy: Optional[bool] = False,
-        **params,
-    ):
-        args = locals()
-        args.pop("max_retries", None)
-        args.pop("self", None)
-        args.pop("params", None)
-        args.pop("__class__", None)
-        if max_retries is not None and isinstance(max_retries, str):
-            max_retries = int(max_retries)  # cast to int
-        args["max_retries"] = max_retries
-        super().__init__(**{**args, **params})
 
     def __contains__(self, key):
         # Define custom behavior for the 'in' operator
@@ -394,6 +345,8 @@ class LiteLLMParamsTypedDict(TypedDict, total=False):
     configurable_clientside_auth_params: CONFIGURABLE_CLIENTSIDE_AUTH_PARAMS  # for allowing api base switching on finetuned models
     ## DROP PARAMS ##
     drop_params: Optional[bool]
+    ## RESPONSES API → CHAT COMPLETIONS BRIDGE ##
+    use_chat_completions_api: Optional[bool]
     ## UNIFIED PROJECT/REGION ##
     region_name: Optional[str]
     ## VERTEX AI ##
@@ -403,6 +356,10 @@ class LiteLLMParamsTypedDict(TypedDict, total=False):
     aws_access_key_id: Optional[str]
     aws_secret_access_key: Optional[str]
     aws_region_name: Optional[str]
+    ## AWS S3 VECTORS ##
+    vector_bucket_name: Optional[str]
+    index_name: Optional[str]
+    embedding_model: Optional[str]
     ## IBM WATSONX ##
     watsonx_region_name: Optional[str]
     ## CUSTOM PRICING ##
@@ -410,6 +367,7 @@ class LiteLLMParamsTypedDict(TypedDict, total=False):
     output_cost_per_token: Optional[float]
     input_cost_per_second: Optional[float]
     output_cost_per_second: Optional[float]
+    output_cost_per_second_1080p: Optional[float]
     num_retries: Optional[int]
     ## MOCK RESPONSES ##
     mock_response: Optional[Union[str, ModelResponse, Exception]]
@@ -417,6 +375,8 @@ class LiteLLMParamsTypedDict(TypedDict, total=False):
     # routing params
     # use this for tag-based routing
     tags: Optional[List[str]]
+    # regex patterns matched against request headers (e.g. "^User-Agent:\\s*claude-code\\/")
+    tag_regex: Optional[List[str]]
 
     # deployment budgets
     max_budget: Optional[float]
@@ -475,7 +435,7 @@ class Deployment(BaseModel):
     def to_json(self, **kwargs):
         try:
             return self.model_dump(**kwargs)  # noqa
-        except Exception as e:
+        except Exception:
             # if using pydantic v1
             return self.dict(**kwargs)
 
@@ -595,7 +555,7 @@ class ModelGroupInfo(BaseModel):
 
     def __init__(self, **data):
         for field_name, field_type in get_type_hints(self.__class__).items():
-            if field_type == bool and data.get(field_name) is None:
+            if field_type is bool and data.get(field_name) is None:
                 data[field_name] = False
         super().__init__(**data)
 
@@ -603,6 +563,67 @@ class ModelGroupInfo(BaseModel):
 class AssistantsTypedDict(TypedDict):
     custom_llm_provider: Literal["azure", "openai"]
     litellm_params: LiteLLMParamsTypedDict
+
+
+class SearchToolLiteLLMParams(TypedDict, total=False):
+    """
+    LiteLLM params for search tools.
+    Search tools don't require a 'model' field like regular deployments.
+    """
+
+    search_provider: Required[SearchProvider]
+    api_key: Optional[str]
+    api_base: Optional[str]
+    timeout: Optional[Union[float, str, httpx.Timeout]]
+    max_retries: Optional[int]
+
+
+class SearchToolInfoTypedDict(TypedDict, total=False):
+    """Optional metadata about a search tool."""
+
+    description: str
+
+
+class SearchToolTypedDict(TypedDict, total=False):
+    """
+    Configuration for a search tool in the router.
+
+    Example:
+        {
+            "search_tool_name": "litellm-search",
+            "litellm_params": {
+                "search_provider": "perplexity",
+                "api_key": "os.environ/PERPLEXITYAI_API_KEY"
+            }
+        }
+    """
+
+    search_tool_name: Required[str]
+    litellm_params: Required[SearchToolLiteLLMParams]
+    search_tool_info: SearchToolInfoTypedDict
+
+
+class GuardrailLiteLLMParams(TypedDict, total=False):
+    """
+    LiteLLM params for guardrails.
+    """
+
+    guardrail: Required[str]
+    mode: Required[str]
+    api_key: Optional[str]
+    api_base: Optional[str]
+    weight: Optional[int]  # For load balancing
+
+
+class GuardrailTypedDict(TypedDict, total=False):
+    """
+    Configuration for a guardrail in the router.
+    """
+
+    guardrail_name: Required[str]
+    litellm_params: Required[GuardrailLiteLLMParams]
+    callback: Any  # The CustomGuardrail instance
+    id: Optional[str]  # Unique identifier for the guardrail deployment
 
 
 class FineTuningConfig(BaseModel):
@@ -738,7 +759,11 @@ OptionalPreCallChecks = List[
         "prompt_caching",
         "router_budget_limiting",
         "responses_api_deployment_check",
+        "deployment_affinity",
+        "session_affinity",
         "forward_client_headers_by_model_group",
+        "enforce_model_rate_limits",
+        "encrypted_content_affinity",
     ]
 ]
 
@@ -791,4 +816,45 @@ class PreRoutingHookResponse(BaseModel):
     """
 
     model: str
-    messages: Optional[List[Dict[str, str]]]
+    messages: Optional[List[Dict[str, Any]]]
+
+
+class RequestType(str, enum.Enum):
+    """Fixed v0 taxonomy. User-extensible types come in v1."""
+
+    CODE_GENERATION = "code_generation"
+    CODE_UNDERSTANDING = "code_understanding"
+    TECHNICAL_DESIGN = "technical_design"
+    ANALYTICAL_REASONING = "analytical_reasoning"
+    WRITING = "writing"
+    FACTUAL_LOOKUP = "factual_lookup"
+    GENERAL = "general"
+
+
+class AdaptiveRouterWeights(BaseModel):
+    quality: float = Field(default=0.7, ge=0.0, le=1.0)
+    cost: float = Field(default=0.3, ge=0.0, le=1.0)
+
+    @field_validator("cost")
+    @classmethod
+    def _weights_sum_to_one(cls, v, info):
+        q = info.data.get("quality", 0.7)
+        if abs(q + v - 1.0) > 0.001:
+            raise ValueError(
+                f"weights must sum to 1.0, got quality={q} + cost={v} = {q + v}"
+            )
+        return v
+
+
+class AdaptiveRouterConfig(BaseModel):
+    available_models: List[str]
+    weights: AdaptiveRouterWeights = Field(default_factory=AdaptiveRouterWeights)
+
+
+class AdaptiveRouterPreferences(BaseModel):
+    """model_info.adaptive_router_preferences — declared by each model."""
+
+    model_config = ConfigDict(use_enum_values=False)
+
+    quality_tier: int = Field(ge=1, le=3)
+    strengths: List[RequestType] = Field(default_factory=list)

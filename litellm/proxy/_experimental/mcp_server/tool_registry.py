@@ -1,9 +1,17 @@
 import json
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from litellm._logging import verbose_logger
 from litellm.proxy.types_utils.utils import get_instance_fn
 from litellm.types.mcp_server.tool_registry import MCPTool
+
+if TYPE_CHECKING:
+    from mcp.types import Tool as MCPToolSDKTool
+else:
+    try:
+        from mcp.types import Tool as MCPToolSDKTool
+    except ImportError:
+        MCPToolSDKTool = None  # type: ignore
 
 
 class MCPToolRegistry:
@@ -39,20 +47,49 @@ class MCPToolRegistry:
         """
         return self.tools.get(name)
 
-    def list_tools(self) -> List[MCPTool]:
+    def list_tools(self, tool_prefix: Optional[str] = None) -> List[MCPTool]:
         """
         List all registered tools
         """
+        if tool_prefix:
+            return [
+                tool
+                for tool in self.tools.values()
+                if tool.name.startswith(tool_prefix)
+            ]
         return list(self.tools.values())
 
+    def convert_tools_to_mcp_sdk_tool_type(
+        self, tools: List[MCPTool]
+    ) -> List["MCPToolSDKTool"]:
+        if MCPToolSDKTool is None:
+            raise ImportError(
+                "MCP SDK is not installed. Please install it with: pip install 'litellm[proxy]'"
+            )
+        return [
+            MCPToolSDKTool(
+                name=tool.name,
+                description=tool.description,
+                inputSchema=tool.input_schema,
+            )
+            for tool in tools
+        ]
+
     def load_tools_from_config(
-        self, mcp_tools_config: Optional[Dict[str, Any]] = None
+        self,
+        mcp_tools_config: Optional[Dict[str, Any]] = None,
+        config_file_path: Optional[str] = None,
     ) -> None:
         """
         Load and register tools from the proxy config
 
         Args:
             mcp_tools_config: The mcp_tools config from the proxy config
+            config_file_path: Path to the operator's config.yaml. Threaded
+                through to ``get_instance_fn`` so an ``s3://``/``gcs://``
+                ``handler`` declared in the YAML resolves; callers from a
+                non-YAML path must leave this ``None`` so the runtime gate
+                fires.
         """
         if mcp_tools_config is None:
             raise ValueError(
@@ -75,7 +112,7 @@ class MCPToolRegistry:
             # First check if it's a module path (e.g., "module.submodule.function")
             if handler_name is None:
                 raise ValueError(f"handler is required for tool {name}")
-            handler = get_instance_fn(handler_name)
+            handler = get_instance_fn(handler_name, config_file_path)
 
             if handler is None:
                 verbose_logger.warning(

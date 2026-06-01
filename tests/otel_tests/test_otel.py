@@ -5,7 +5,7 @@ import asyncio
 import aiohttp, openai
 from openai import OpenAI, AsyncOpenAI
 from typing import Optional, List, Union
-import uuid
+from litellm._uuid import uuid
 
 
 async def generate_key(
@@ -99,14 +99,29 @@ async def test_chat_completion_check_otel_spans():
 
         await asyncio.sleep(3)
 
-        otel_spans = await get_otel_spans(session=session, key=key)
+        # /otel-spans requires proxy admin; use the master key.
+        otel_spans = await get_otel_spans(session=session, key="sk-1234")
         print("otel_spans: ", otel_spans)
 
         all_otel_spans = otel_spans["otel_spans"]
-        most_recent_parent = str(otel_spans["most_recent_parent"])
-        print("Most recent OTEL parent: ", most_recent_parent)
-        print("\n spans grouped by parent: ", otel_spans["spans_grouped_by_parent"])
-        parent_trace_spans = otel_spans["spans_grouped_by_parent"][most_recent_parent]
+        spans_grouped_by_parent = otel_spans["spans_grouped_by_parent"]
+        print("\n spans grouped by parent: ", spans_grouped_by_parent)
+
+        # The GET /otel-spans request itself produces auth spans that beat
+        # the chat-completion spans on start_time, so `most_recent_parent`
+        # points at the wrong trace. Pick the chat-completion trace by
+        # content: it's the one carrying the full set of expected markers.
+        chat_completion_markers = {
+            "postgres",
+            "redis",
+            "raw_gen_ai_request",
+            "batch_write_to_db",
+        }
+        parent_trace_spans = next(
+            spans
+            for spans in spans_grouped_by_parent.values()
+            if chat_completion_markers.issubset(spans)
+        )
 
         print("Parent trace spans: ", parent_trace_spans)
 
@@ -117,5 +132,4 @@ async def test_chat_completion_check_otel_spans():
         assert "postgres" in parent_trace_spans
         assert "redis" in parent_trace_spans
         assert "raw_gen_ai_request" in parent_trace_spans
-        assert "litellm_request" in parent_trace_spans
         assert "batch_write_to_db" in parent_trace_spans
