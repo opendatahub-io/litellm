@@ -1,6 +1,4 @@
 import json
-import os
-import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -8,9 +6,6 @@ import pytest
 
 from litellm.llms.custom_httpx.http_handler import get_shared_realtime_ssl_context
 
-sys.path.insert(
-    0, os.path.abspath("../../../../..")
-)  # Adds the parent directory to the system path
 
 
 @pytest.mark.parametrize(
@@ -97,7 +92,6 @@ def test_openai_realtime_handler_model_parameter_inclusion():
 
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -213,18 +207,77 @@ async def test_async_realtime_url_contains_model():
         assert called_url.startswith("wss://api.openai.com/v1/realtime?")
         assert f"model={model}" in called_url
 
-        # Verify proper headers were set
+        # Verify proper headers were set (GA default: no OpenAI-Beta unless client sent it)
         called_kwargs = mock_ws_connect.call_args[1]
         assert "additional_headers" in called_kwargs
         additional_headers = called_kwargs["additional_headers"]
         assert additional_headers["Authorization"] == f"Bearer {api_key}"
-        assert additional_headers["OpenAI-Beta"] == "realtime=v1"
+        assert "OpenAI-Beta" not in additional_headers
         # Verify SSL is configured (should be an SSLContext or True, not None or False)
         assert called_kwargs["ssl"] is not None
         assert called_kwargs["ssl"] is not False
 
         mock_realtime_streaming.assert_called_once()
         mock_streaming_instance.bidirectional_forward.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_async_realtime_forwards_openai_beta_header_when_client_sends_it():
+    """Upstream WS gets OpenAI-Beta: realtime=v1 only when the client WebSocket included it."""
+    from litellm.llms.openai.realtime.handler import OpenAIRealtime
+    from litellm.types.realtime import RealtimeQueryParams
+
+    handler = OpenAIRealtime()
+    api_base = "https://api.openai.com/"
+    api_key = "test-key"
+    model = "gpt-4o-mini-realtime-preview"
+    query_params: RealtimeQueryParams = {"model": model}
+
+    dummy_websocket = MagicMock()
+    dummy_websocket.scope = {
+        "headers": [
+            (b"openai-beta", b"realtime=v1"),
+        ]
+    }
+    dummy_logging_obj = MagicMock()
+    mock_backend_ws = AsyncMock()
+
+    class DummyAsyncContextManager:
+        def __init__(self, value):
+            self.value = value
+
+        async def __aenter__(self):
+            return self.value
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    with (
+        patch(
+            "websockets.connect", return_value=DummyAsyncContextManager(mock_backend_ws)
+        ) as mock_ws_connect,
+        patch(
+            "litellm.llms.openai.realtime.handler.RealTimeStreaming"
+        ) as mock_realtime_streaming,
+    ):
+        mock_streaming_instance = MagicMock()
+        mock_realtime_streaming.return_value = mock_streaming_instance
+        mock_streaming_instance.bidirectional_forward = AsyncMock()
+
+        await handler.async_realtime(
+            model=model,
+            websocket=dummy_websocket,
+            logging_obj=dummy_logging_obj,
+            api_base=api_base,
+            api_key=api_key,
+            query_params=query_params,
+        )
+
+        mock_ws_connect.assert_called_once()
+        called_kwargs = mock_ws_connect.call_args[1]
+        additional_headers = called_kwargs["additional_headers"]
+        assert additional_headers["Authorization"] == f"Bearer {api_key}"
+        assert additional_headers["OpenAI-Beta"] == "realtime=v1"
 
 
 @pytest.mark.asyncio
@@ -363,3 +416,52 @@ async def test_async_realtime_ws_url_has_no_ssl():
 
         # Verify ssl is None for ws:// URLs (the fix for issue #19222)
         assert called_kwargs["ssl"] is None
+
+
+@pytest.mark.asyncio
+async def test_async_realtime_upstream_handshake_refusal_sends_error_event_then_policy_close():
+    from typing import cast
+
+    from websockets.datastructures import Headers
+    from websockets.exceptions import InvalidStatus
+    from websockets.http11 import Response
+
+    from litellm.llms.openai.realtime.handler import OpenAIRealtime
+    from litellm.types.realtime import RealtimeErrorEvent
+
+    handler = OpenAIRealtime()
+    model = "gpt-realtime"
+
+    sent: list[str] = []
+    closed: list[tuple[int, str | None]] = []
+
+    class RecordingClientWebSocket:
+        scope: dict[str, list[tuple[bytes, bytes]]] = {"headers": []}
+
+        async def send_text(self, data: str) -> None:
+            sent.append(data)
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            closed.append((code, reason))
+
+    dummy_websocket = RecordingClientWebSocket()
+    dummy_logging_obj = MagicMock()
+
+    refused = InvalidStatus(Response(401, "Unauthorized", Headers()))
+
+    with patch("websockets.connect", side_effect=refused):
+        await handler.async_realtime(  # pyright: ignore[reportUnknownMemberType]  # handler's websocket param is Any
+            model=model,
+            websocket=dummy_websocket,
+            logging_obj=dummy_logging_obj,
+            api_base="https://api.openai.com/",
+            api_key="bad-key",
+            query_params={"model": model},
+        )
+
+    assert len(sent) == 1
+    event = cast(RealtimeErrorEvent, json.loads(sent[0]))
+    assert event["type"] == "error"
+    assert event["error"]["type"] == "server_error"
+    assert "401" in event["error"]["message"]
+    assert closed and closed[0][0] == 1008

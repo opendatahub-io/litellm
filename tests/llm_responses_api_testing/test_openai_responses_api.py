@@ -1,5 +1,4 @@
 import os
-import sys
 import pytest
 import asyncio
 from typing import Optional, cast
@@ -10,10 +9,8 @@ from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLogging
 import time
 import json
 
-sys.path.insert(0, os.path.abspath("../.."))
 import litellm
 from litellm.integrations.custom_logger import CustomLogger
-import json
 from litellm.types.utils import StandardLoggingPayload
 from litellm.types.llms.openai import (
     ResponseCompletedEvent,
@@ -28,7 +25,7 @@ from base_responses_api import BaseResponsesAPITest, validate_responses_api_resp
 class TestOpenAIResponsesAPITest(BaseResponsesAPITest):
     def get_base_completion_call_args(self):
         return {
-            "model": "openai/gpt-4o",
+            "model": "openai/gpt-5.5",
         }
 
     def get_base_completion_reasoning_call_args(self):
@@ -104,7 +101,7 @@ def test_basic_openai_responses_api_streaming_with_logging():
     litellm.set_verbose = True
     test_custom_logger = TestCustomLogger()
     litellm.callbacks = [test_custom_logger]
-    request_model = "gpt-4o"
+    request_model = "gpt-5.5"
     response = litellm.responses(
         model=request_model,
         input="hi",
@@ -176,7 +173,7 @@ async def test_basic_openai_responses_api_non_streaming_with_logging():
     litellm.set_verbose = True
     test_custom_logger = TestCustomLogger()
     litellm.callbacks = [test_custom_logger]
-    request_model = "gpt-4o"
+    request_model = "gpt-5.5"
     response = await litellm.aresponses(
         model=request_model,
         input="hi",
@@ -215,13 +212,13 @@ async def test_openai_responses_api_returns_headers(sync_mode):
 
     if sync_mode:
         response = litellm.responses(
-            model="gpt-4o",
+            model="gpt-5.5",
             input="Say hello",
             max_output_tokens=20,
         )
     else:
         response = await litellm.aresponses(
-            model="gpt-4o",
+            model="gpt-5.5",
             input="Say hello",
             max_output_tokens=20,
         )
@@ -471,7 +468,7 @@ async def test_openai_responses_api_streaming_validation(sync_mode):
 
     if sync_mode:
         response = litellm.responses(
-            model="gpt-4o",
+            model="gpt-5.5",
             input="Tell me about artificial intelligence in 3 sentences.",
             stream=True,
         )
@@ -481,7 +478,7 @@ async def test_openai_responses_api_streaming_validation(sync_mode):
             event_types_seen.add(event.type)
     else:
         response = await litellm.aresponses(
-            model="gpt-4o",
+            model="gpt-5.5",
             input="Tell me about artificial intelligence in 3 sentences.",
             stream=True,
         )
@@ -511,7 +508,7 @@ async def test_openai_responses_litellm_router(sync_mode):
             {
                 "model_name": "gpt4o-special-alias",
                 "litellm_params": {
-                    "model": "gpt-4o",
+                    "model": "gpt-5.5",
                     "api_key": os.getenv("OPENAI_API_KEY"),
                 },
             }
@@ -556,7 +553,7 @@ async def test_openai_responses_litellm_router_streaming(sync_mode):
             {
                 "model_name": "gpt4o-special-alias",
                 "litellm_params": {
-                    "model": "gpt-4o",
+                    "model": "gpt-5.5",
                     "api_key": os.getenv("OPENAI_API_KEY"),
                 },
             }
@@ -605,7 +602,7 @@ async def test_openai_responses_litellm_router_no_metadata():
         "object": "response",
         "created_at": 1741476542,
         "status": "completed",
-        "model": "gpt-4o",
+        "model": "gpt-5.5",
         "output": [
             {
                 "type": "message",
@@ -664,7 +661,7 @@ async def test_openai_responses_litellm_router_no_metadata():
                 {
                     "model_name": "gpt4o-special-alias",
                     "litellm_params": {
-                        "model": "gpt-4o",
+                        "model": "gpt-5.5",
                         "api_key": "fake-key",
                     },
                 }
@@ -704,7 +701,7 @@ async def test_openai_responses_litellm_router_with_metadata():
         "object": "response",
         "created_at": 1741476542,
         "status": "completed",
-        "model": "gpt-4o",
+        "model": "gpt-5.5",
         "output": [
             {
                 "type": "message",
@@ -762,7 +759,7 @@ async def test_openai_responses_litellm_router_with_metadata():
                 {
                     "model_name": "gpt4o-special-alias",
                     "litellm_params": {
-                        "model": "gpt-4o",
+                        "model": "gpt-5.5",
                         "api_key": "fake-key",
                     },
                 }
@@ -802,7 +799,7 @@ async def test_openai_responses_litellm_router_with_prompt():
         "object": "response",
         "created_at": 1741476542,
         "status": "completed",
-        "model": "gpt-4o",
+        "model": "gpt-5.5",
         "output": [],
         "parallel_tool_calls": True,
         "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
@@ -844,7 +841,7 @@ async def test_openai_responses_litellm_router_with_prompt():
                 {
                     "model_name": "gpt4o-special-alias",
                     "litellm_params": {
-                        "model": "gpt-4o",
+                        "model": "gpt-5.5",
                         "api_key": "fake-key",
                     },
                 }
@@ -865,7 +862,7 @@ async def test_openai_responses_litellm_router_with_prompt():
 def test_bad_request_bad_param_error():
     """Raise a BadRequestError when an invalid parameter value is provided"""
     try:
-        litellm.responses(model="gpt-4o", input="This should fail", temperature=2000)
+        litellm.responses(model="gpt-5.5", input="This should fail", temperature=2000)
         pytest.fail("Expected BadRequestError but no exception was raised")
     except litellm.BadRequestError as e:
         print(f"Exception raised: {e}")
@@ -881,7 +878,7 @@ async def test_async_bad_request_bad_param_error():
     """Raise a BadRequestError when an invalid parameter value is provided"""
     try:
         await litellm.aresponses(
-            model="gpt-4o", input="This should fail", temperature=2000
+            model="gpt-5.5", input="This should fail", temperature=2000
         )
         pytest.fail("Expected BadRequestError but no exception was raised")
     except litellm.BadRequestError as e:
@@ -1280,7 +1277,7 @@ async def test_openai_responses_api_field_types():
 
     # Test with store=True
     response = await litellm.aresponses(
-        model="gpt-4o",
+        model="gpt-5.5",
         input="hi",
     )
 
@@ -1292,7 +1289,7 @@ async def test_openai_responses_api_field_types():
     assert response.store is True, "store field should match input value"
 
     # Test without store parameter
-    response_without_store = await litellm.aresponses(model="gpt-4o", input="hi")
+    response_without_store = await litellm.aresponses(model="gpt-5.5", input="hi")
 
     # Verify created_at is still an integer
     assert isinstance(
@@ -1310,7 +1307,7 @@ async def test_store_field_transformation():
 
     # Initialize logging object with required parameters
     logging_obj = LiteLLMLoggingObj(
-        model="gpt-4o",
+        model="gpt-5.5",
         messages=[],
         stream=False,
         call_type="aresponses",
@@ -1323,7 +1320,7 @@ async def test_store_field_transformation():
     base_response = {
         "id": "test_id",
         "created_at": 1751443898,
-        "model": "gpt-4o",
+        "model": "gpt-5.5",
         "object": "response",
         "output": [
             {
@@ -1378,7 +1375,7 @@ async def test_store_field_transformation():
     # Test when store=True in request
     logging_obj.optional_params = {"store": True}
     response = config.transform_response_api_response(
-        model="gpt-4o", raw_response=mock_response_store_true, logging_obj=logging_obj
+        model="gpt-5.5", raw_response=mock_response_store_true, logging_obj=logging_obj
     )
     assert (
         response.store is True
@@ -1387,7 +1384,7 @@ async def test_store_field_transformation():
     # Test when store=False in request
     logging_obj.optional_params = {"store": False}
     response = config.transform_response_api_response(
-        model="gpt-4o", raw_response=mock_response_store_false, logging_obj=logging_obj
+        model="gpt-5.5", raw_response=mock_response_store_false, logging_obj=logging_obj
     )
     assert (
         response.store is False
@@ -1395,7 +1392,7 @@ async def test_store_field_transformation():
 
     # Test when store not in request but API returns null
     response = config.transform_response_api_response(
-        model="gpt-4o", raw_response=mock_response_store_null, logging_obj=logging_obj
+        model="gpt-5.5", raw_response=mock_response_store_null, logging_obj=logging_obj
     )
     assert (
         response.store is None
@@ -1403,7 +1400,7 @@ async def test_store_field_transformation():
 
     # Test when store not in request and API omits store field
     response = config.transform_response_api_response(
-        model="gpt-4o", raw_response=mock_response_no_store, logging_obj=logging_obj
+        model="gpt-5.5", raw_response=mock_response_no_store, logging_obj=logging_obj
     )
     assert (
         response.store is None
@@ -1484,7 +1481,7 @@ async def test_aresponses_service_tier_and_safety_identifier():
 
         # Call aresponses with service_tier and safety_identifier
         response = await litellm.aresponses(
-            model="openai/gpt-4o",
+            model="openai/gpt-5.5",
             input="Test with service tier and safety identifier",
             service_tier="flex",
             safety_identifier="123",
@@ -1502,7 +1499,7 @@ async def test_aresponses_service_tier_and_safety_identifier():
         assert (
             request_body["safety_identifier"] == "123"
         ), "safety_identifier should be '123' in request body"
-        assert request_body["model"] == "gpt-4o"
+        assert request_body["model"] == "gpt-5.5"
         assert request_body["input"] == "Test with service tier and safety identifier"
 
         # Validate the response
@@ -1609,7 +1606,7 @@ async def test_openai_gpt5_reasoning_effort_parameter():
 @pytest.mark.parametrize("stream", [True, False])
 async def test_basic_openai_responses_with_websearch(stream):
     litellm._turn_on_debug()
-    request_model = "gpt-4o"
+    request_model = "gpt-5.5"
     response = await litellm.aresponses(
         model=request_model,
         stream=stream,
@@ -1628,23 +1625,30 @@ async def test_openai_responses_api_token_limit_error():
     """
     Relevant issue: https://github.com/BerriAI/litellm/issues/15785
 
-
-    When this fails you'll see:
-    "pydantic_core._pydantic_core.ValidationError: 3 validation errors for ErrorEvent"
-    in the console.
+    Parsing the in-stream ErrorEvent must not raise
+    "pydantic_core._pydantic_core.ValidationError: 3 validation errors for ErrorEvent".
+    The iterator now surfaces the event as litellm.APIError with status 400
+    (invalid_request_error is a non-retriable client error, so no
+    MidStreamFallbackError wrapping) carrying the provider's message.
     """
     litellm._turn_on_debug()
 
     # Generate text with >400k tokens to trigger token limit error
     oversized_text = "This is a test sentence. " * 50000  # ~400k tokens
 
-    # This will raise ValidationError instead of showing the real error
     response = await litellm.aresponses(
         model="gpt-5-mini", input=oversized_text, stream=True
     )
 
-    async for event in response:
-        print(event)  # Never reaches here - ValidationError is raised
+    async def _drain():
+        async for event in response:
+            print(event)
+
+    with pytest.raises(litellm.APIError) as exc_info:
+        await _drain()
+
+    assert exc_info.value.status_code == 400
+    assert "exceeds the context window" in str(exc_info.value)
 
 
 async def test_openai_streaming_logging():
@@ -1715,7 +1719,7 @@ def extra_body_mock_response_data():
         "object": "response",
         "created_at": 1234567890,
         "status": "completed",
-        "model": "gpt-4o",
+        "model": "gpt-5.5",
         "output": [
             {
                 "type": "message",
@@ -1747,7 +1751,7 @@ async def test_aresponses_extra_body_params_passed(extra_body_mock_response_data
         mock_post.return_value = MockResponse(extra_body_mock_response_data, 200)
 
         response = await litellm.aresponses(
-            model="gpt-4o",
+            model="gpt-5.5",
             input="Test input",
             max_output_tokens=20,
             extra_body={
@@ -1768,7 +1772,7 @@ async def test_aresponses_extra_body_params_passed(extra_body_mock_response_data
         assert request_body["custom_param_2"]["nested"] == "value2"
         assert "experimental_feature" in request_body
         assert request_body["experimental_feature"] is True
-        assert request_body["model"] == "gpt-4o"
+        assert request_body["model"] == "gpt-5.5"
         assert request_body["input"] == "Test input"
 
 
@@ -1779,7 +1783,7 @@ def test_responses_extra_body_params_passed_sync(extra_body_mock_response_data):
         return_value=MockResponse(extra_body_mock_response_data, 200),
     ) as mock_post:
         response = litellm.responses(
-            model="gpt-4o",
+            model="gpt-5.5",
             input="Sync test",
             max_output_tokens=20,
             extra_body={
@@ -1797,7 +1801,7 @@ def test_responses_extra_body_params_passed_sync(extra_body_mock_response_data):
         assert request_body["sync_custom_param"] == "sync_value"
         assert "another_param" in request_body
         assert request_body["another_param"] == 42
-        assert request_body["model"] == "gpt-4o"
+        assert request_body["model"] == "gpt-5.5"
 
 
 @pytest.mark.asyncio
@@ -1810,9 +1814,9 @@ async def test_extra_body_merges_with_request_data(extra_body_mock_response_data
         mock_post.return_value = MockResponse(extra_body_mock_response_data, 200)
 
         await litellm.aresponses(
-            model="gpt-4o",
+            model="gpt-5.5",
             input="Test",
-            temperature=0.7,
+            temperature=1,
             max_output_tokens=20,
             extra_body={
                 "custom_field": "custom_value",
@@ -1847,13 +1851,13 @@ async def test_openai_compact_responses_api(sync_mode):
     try:
         if sync_mode:
             response = litellm.compact_responses(
-                model="openai/gpt-4o",
+                model="openai/gpt-5.5",
                 input=input_messages,
                 instructions="Be helpful and concise",
             )
         else:
             response = await litellm.acompact_responses(
-                model="openai/gpt-4o",
+                model="openai/gpt-5.5",
                 input=input_messages,
                 instructions="Be helpful and concise",
             )

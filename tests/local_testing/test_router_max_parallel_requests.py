@@ -2,15 +2,12 @@
 ## Unit tests for the max_parallel_requests feature on Router
 import asyncio
 import inspect
-import os
-import sys
 import time
 import traceback
 from datetime import datetime
 
 import pytest
 
-sys.path.insert(0, os.path.abspath("../.."))
 from typing import Optional
 
 import litellm
@@ -123,8 +120,6 @@ def test_setting_mpr_limits_per_model(
 
 
 async def _handle_router_calls(router):
-    import random
-
     pre_fill = """
     Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nunc ut finibus massa. Quisque a magna magna. Quisque neque diam, varius sit amet tellus eu, elementum fermentum sapien. Integer ut erat eget arcu rutrum blandit. Morbi a metus purus. Nulla porta, urna at finibus malesuada, velit ante suscipit orci, vitae laoreet dui ligula ut augue. Cras elementum pretium dui, nec luctus nulla aliquet ut. Nam faucibus, diam nec semper interdum, nisl nisi viverra nulla, vitae sodales elit ex a purus. Donec tristique malesuada lobortis. Donec posuere iaculis nisl, vitae accumsan libero dignissim dignissim. Suspendisse finibus leo et ex mattis tempor. Praesent at nisl vitae quam egestas lacinia. Donec in justo non erat aliquam accumsan sed vitae ex. Vivamus gravida diam vel ipsum tincidunt dignissim.
 
@@ -141,7 +136,11 @@ async def _handle_router_calls(router):
         [
             {
                 "role": "user",
-                "content": f"{pre_fill * 3}\n\nRecite the Declaration of independence at a speed of {random.random() * 100} words per minute.",
+                # Fixed speed (was random.random()*100) so the request body is
+                # deterministic and the VCR cassette replays instead of
+                # appending a new episode every run. This is a rate-limiting
+                # test; the prompt content is irrelevant to what it asserts.
+                "content": f"{pre_fill * 3}\n\nRecite the Declaration of independence at a speed of 50.0 words per minute.",
             }
         ],
         stream=True,
@@ -203,9 +202,12 @@ async def test_max_parallel_requests_tpm_rate_limiting_base_case():
         num_retries=0,
     )
 
-    with pytest.raises(litellm.RateLimitError):
+    async def _exceed_limit():
         for _ in range(2):
             await router.acompletion(
                 model="gpt-4o-2024-08-06",
                 messages=_messages,
             )
+
+    with pytest.raises(litellm.RateLimitError):
+        await _exceed_limit()

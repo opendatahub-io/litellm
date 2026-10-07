@@ -9,14 +9,9 @@ Testing for _assemble_complete_response_from_streaming_chunks
 """
 
 import json
-import os
-import sys
 from datetime import datetime
 from unittest.mock import AsyncMock
 
-sys.path.insert(
-    0, os.path.abspath("../..")
-)  # Adds the parent directory to the system path
 
 
 import httpx
@@ -65,7 +60,7 @@ def test_assemble_complete_response_from_streaming_chunks_1(is_async):
             )
         ],
         "created": 1721353246,
-        "model": "gpt-3.5-turbo",
+        "model": "gpt-5-mini",
         "object": "chat.completion.chunk",
         "system_fingerprint": None,
         "usage": None,
@@ -105,7 +100,7 @@ def test_assemble_complete_response_from_streaming_chunks_1(is_async):
             )
         ],
         "created": 1721353246,
-        "model": "gpt-3.5-turbo",
+        "model": "gpt-5-mini",
         "object": "chat.completion.chunk",
         "system_fingerprint": None,
         "usage": None,
@@ -166,7 +161,7 @@ def test_assemble_complete_response_from_streaming_chunks_2(is_async):
             )
         ],
         "created": 1721353246,
-        "model": "gpt-3.5-turbo",
+        "model": "gpt-5-mini",
         "object": "chat.completion.chunk",
         "system_fingerprint": None,
         "usage": None,
@@ -208,7 +203,7 @@ def test_assemble_complete_response_from_streaming_chunks_2(is_async):
             )
         ],
         "created": 1721353246,
-        "model": "gpt-3.5-turbo",
+        "model": "gpt-5-mini",
         "object": "chat.completion.chunk",
         "system_fingerprint": None,
         "usage": None,
@@ -263,7 +258,7 @@ def test_assemble_complete_response_from_streaming_chunks_3(is_async):
             )
         ],
         "created": 1721353246,
-        "model": "gpt-3.5-turbo",
+        "model": "gpt-5-mini",
         "object": "chat.completion.chunk",
         "system_fingerprint": None,
         "usage": None,
@@ -340,7 +335,7 @@ def test_assemble_complete_response_from_streaming_chunks_4(is_async):
             )
         ],
         "created": 1721353246,
-        "model": "gpt-3.5-turbo",
+        "model": "gpt-5-mini",
         "object": "chat.completion.chunk",
         "system_fingerprint": None,
         "usage": None,

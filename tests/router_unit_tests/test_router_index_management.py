@@ -1,12 +1,7 @@
-import sys
 import os
 import pytest
 import ast
-import ast
 
-sys.path.insert(
-    0, os.path.abspath("../..")
-)  # Adds the parent directory to the system path
 from litellm import Router
 
 
@@ -22,8 +17,8 @@ class TestRouterIndexManagement:
         """Test that deleting a deployment updates model_name_to_deployment_indices correctly"""
         router.model_list = [
             {"model_name": "gpt-3.5", "model_info": {"id": "model-1"}},
-            {"model_name": "gpt-4", "model_info": {"id": "model-2"}},
-            {"model_name": "gpt-4", "model_info": {"id": "model-3"}},
+            {"model_name": "gpt-5.5", "model_info": {"id": "model-2"}},
+            {"model_name": "gpt-5.5", "model_info": {"id": "model-3"}},
             {"model_name": "claude", "model_info": {"id": "model-4"}},
         ]
         router.model_id_to_deployment_index_map = {
@@ -34,31 +29,31 @@ class TestRouterIndexManagement:
         }
         router.model_name_to_deployment_indices = {
             "gpt-3.5": [0],
-            "gpt-4": [1, 2],
+            "gpt-5.5": [1, 2],
             "claude": [3],
         }
 
-        # Remove one of the duplicate gpt-4 deployments
+        # Remove one of the duplicate gpt-5.5 deployments
         router._update_deployment_indices_after_removal(
             model_id="model-2", removal_idx=1
         )
 
         # Verify indices are shifted correctly
         assert router.model_name_to_deployment_indices["gpt-3.5"] == [0]
-        assert router.model_name_to_deployment_indices["gpt-4"] == [
+        assert router.model_name_to_deployment_indices["gpt-5.5"] == [
             1
         ]  # was [1,2], removed 1, shifted 2->1
         assert router.model_name_to_deployment_indices["claude"] == [
             2
         ]  # was [3], shifted to [2]
 
-        # Remove the last gpt-4 deployment
+        # Remove the last gpt-5.5 deployment
         router._update_deployment_indices_after_removal(
             model_id="model-3", removal_idx=1
         )
 
-        # Verify gpt-4 is removed from dict when no deployments remain
-        assert "gpt-4" not in router.model_name_to_deployment_indices
+        # Verify gpt-5.5 is removed from dict when no deployments remain
+        assert "gpt-5.5" not in router.model_name_to_deployment_indices
         assert router.model_name_to_deployment_indices["gpt-3.5"] == [0]
         assert router.model_name_to_deployment_indices["claude"] == [1]
 
@@ -66,13 +61,13 @@ class TestRouterIndexManagement:
         """Test _build_model_id_to_deployment_index_map function"""
         model_list = [
             {
-                "model_name": "gpt-3.5-turbo",
-                "litellm_params": {"model": "gpt-3.5-turbo"},
+                "model_name": "gpt-5-mini",
+                "litellm_params": {"model": "gpt-5-mini"},
                 "model_info": {"id": "model-1"},
             },
             {
-                "model_name": "gpt-4",
-                "litellm_params": {"model": "gpt-4"},
+                "model_name": "gpt-5.5",
+                "litellm_params": {"model": "gpt-5.5"},
                 "model_info": {"id": "model-2"},
             },
         ]
@@ -136,19 +131,19 @@ class TestRouterIndexManagement:
             "model_info": {
                 "id": "dep-1",
                 "team_id": "team-abc",
-                "team_public_model_name": "gpt-4o",
+                "team_public_model_name": "gpt-5.5",
             },
         }
         router._update_team_model_index(model, 0)
-        assert router.team_model_to_deployment_indices[("team-abc", "gpt-4o")] == [0]
+        assert router.team_model_to_deployment_indices[("team-abc", "gpt-5.5")] == [0]
         router._update_team_model_index(model, 2)
-        assert router.team_model_to_deployment_indices[("team-abc", "gpt-4o")] == [0, 2]
+        assert router.team_model_to_deployment_indices[("team-abc", "gpt-5.5")] == [0, 2]
 
         router._update_team_model_index(
             {"model_name": "x", "model_info": {"id": "dep-2"}}, 5
         )
         assert router.team_model_to_deployment_indices == {
-            ("team-abc", "gpt-4o"): [0, 2],
+            ("team-abc", "gpt-5.5"): [0, 2],
         }
 
     def test_has_model_id(self, router):
@@ -183,18 +178,18 @@ class TestRouterIndexManagement:
         """Test _build_model_name_index function"""
         model_list = [
             {
-                "model_name": "gpt-3.5-turbo",
-                "litellm_params": {"model": "gpt-3.5-turbo"},
+                "model_name": "gpt-5-mini",
+                "litellm_params": {"model": "gpt-5-mini"},
                 "model_info": {"id": "model-1"},
             },
             {
-                "model_name": "gpt-4",
-                "litellm_params": {"model": "gpt-4"},
+                "model_name": "gpt-5.5",
+                "litellm_params": {"model": "gpt-5.5"},
                 "model_info": {"id": "model-2"},
             },
             {
-                "model_name": "gpt-4",  # Duplicate model_name, different deployment
-                "litellm_params": {"model": "gpt-4"},
+                "model_name": "gpt-5.5",  # Duplicate model_name, different deployment
+                "litellm_params": {"model": "gpt-5.5"},
                 "model_info": {"id": "model-3"},
             },
         ]
@@ -203,14 +198,14 @@ class TestRouterIndexManagement:
         router._build_model_name_index(model_list)
 
         # Verify: model_name_to_deployment_indices is correctly built
-        assert "gpt-3.5-turbo" in router.model_name_to_deployment_indices
-        assert "gpt-4" in router.model_name_to_deployment_indices
+        assert "gpt-5-mini" in router.model_name_to_deployment_indices
+        assert "gpt-5.5" in router.model_name_to_deployment_indices
 
-        # Verify: gpt-3.5-turbo has single deployment
-        assert router.model_name_to_deployment_indices["gpt-3.5-turbo"] == [0]
+        # Verify: gpt-5-mini has single deployment
+        assert router.model_name_to_deployment_indices["gpt-5-mini"] == [0]
 
-        # Verify: gpt-4 has multiple deployments
-        assert router.model_name_to_deployment_indices["gpt-4"] == [1, 2]
+        # Verify: gpt-5.5 has multiple deployments
+        assert router.model_name_to_deployment_indices["gpt-5.5"] == [1, 2]
 
         # Test: Rebuild index (should clear and rebuild)
         new_model_list = [
@@ -223,8 +218,8 @@ class TestRouterIndexManagement:
         router._build_model_name_index(new_model_list)
 
         # Verify: Old entries are cleared
-        assert "gpt-3.5-turbo" not in router.model_name_to_deployment_indices
-        assert "gpt-4" not in router.model_name_to_deployment_indices
+        assert "gpt-5-mini" not in router.model_name_to_deployment_indices
+        assert "gpt-5.5" not in router.model_name_to_deployment_indices
 
         # Verify: New entry is added
         assert "claude-3" in router.model_name_to_deployment_indices
@@ -242,10 +237,12 @@ class TestRouterIndexManagement:
         - model_name_to_deployment_indices for O(1) + O(k) model_name lookups
         """
         # Methods that are allowed to iterate through self.model_list
-        ALLOWED_METHODS = [
-            "_get_deployment_by_litellm_model",  # Edge case: lookup by litellm_params.model (not indexed)
-            "_finalize_adaptive_router_if_configured",  # Init-time prefix scan for "auto_router/adaptive_router" (no index for prefix match)
-        ]
+        ALLOWED_METHODS = {
+            "_get_deployment_by_litellm_model": "lookup by litellm_params.model, which is not indexed",
+            "_finalize_adaptive_router_if_configured": 'init-time prefix scan for "auto_router/adaptive_router"; no index for prefix match',
+            "config_deployments": "filters the whole list on model_info.db_model; admin path only (model add/upsert)",
+            "auto_router_capability_violation": "counts gated auto-routers across the whole list; admin path only (auto-router init/upsert)",
+        }
 
         # Get path to router.py
         router_file = os.path.join(

@@ -97,6 +97,88 @@ def unauthenticated_client():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("byok_first", [True, False])
+def test_byok_challenge_discovers_api_key_flow(monkeypatch, byok_first):
+    from litellm.proxy._experimental.mcp_server import byok_oauth_endpoints, discoverable_endpoints
+    from litellm.proxy._experimental.mcp_server.oauth_utils import get_byok_www_authenticate
+
+    monkeypatch.delenv("PROXY_BASE_URL", raising=False)
+    monkeypatch.delenv("SERVER_ROOT_PATH", raising=False)
+    app = FastAPI()
+    routers = (byok_oauth_endpoints.router, discoverable_endpoints.router)
+    for item in routers if byok_first else reversed(routers):
+        app.include_router(item)
+    with TestClient(app) as session:
+        challenge = get_byok_www_authenticate()
+        assert challenge == 'Bearer resource_metadata="/v1/mcp/oauth/protected-resource"'
+        response = session.get(challenge.split('"')[1])
+        assert response.status_code == 200
+        assert response.json() == {
+            "resource": "http://testserver",
+            "authorization_servers": ["http://testserver/v1/mcp/oauth"],
+        }
+        authorization = session.get("/.well-known/oauth-authorization-server/v1/mcp/oauth")
+        assert authorization.status_code == 200
+        metadata = authorization.json()
+        assert metadata["issuer"] == response.json()["authorization_servers"][0]
+        assert metadata["authorization_endpoint"] == "http://testserver/v1/mcp/oauth/authorize"
+        assert metadata["token_endpoint"] == "http://testserver/v1/mcp/oauth/token"
+        assert metadata["code_challenge_methods_supported"] == ["S256"]
+
+
+@pytest.mark.parametrize(
+    ("base_url", "root_path", "expected"),
+    [
+        ("", "", "/v1/mcp/oauth/protected-resource"),
+        ("", "/proxy", "/proxy/v1/mcp/oauth/protected-resource"),
+        ("https://gateway.example.com/proxy", "/proxy", "https://gateway.example.com/proxy/v1/mcp/oauth/protected-resource"),
+    ],
+)
+def test_byok_challenge_preserves_external_base(monkeypatch, base_url, root_path, expected):
+    from litellm.proxy._experimental.mcp_server.oauth_utils import get_byok_www_authenticate
+
+    monkeypatch.setenv("PROXY_BASE_URL", base_url)
+    monkeypatch.setenv("SERVER_ROOT_PATH", root_path)
+    assert get_byok_www_authenticate() == f'Bearer resource_metadata="{expected}"'
+
+
+def test_byok_discovery_preserves_per_request_prefixes(monkeypatch):
+    from fastapi import FastAPI
+
+    from litellm.proxy._experimental.mcp_server.server import _check_byok_credential
+    from litellm.proxy.middleware.per_request_root_path_middleware import PerRequestRootPathMiddleware
+    from litellm.types.mcp_server.mcp_server_manager import MCPServer
+
+    monkeypatch.delenv("PROXY_BASE_URL", raising=False)
+    monkeypatch.delenv("SERVER_ROOT_PATH", raising=False)
+    monkeypatch.setenv("SERVER_ROOT_PATHS", "/tenant-a,/tenant-b")
+    app = FastAPI()
+    app.include_router(router)
+    app.add_middleware(PerRequestRootPathMiddleware, root_paths=("/tenant-a", "/tenant-b"))
+    server = MCPServer(server_id="byok-prefix", name="byok-prefix", transport=MCPTransport.http, is_byok=True)
+
+    @app.get("/challenge")
+    async def challenge():
+        await _check_byok_credential(server, None)
+
+    with TestClient(app) as client:
+        for prefix in ("/tenant-a", "/tenant-b", ""):
+            challenge_response = client.get(f"{prefix}/challenge")
+            assert challenge_response.status_code == 401
+            metadata_path = f"{prefix}/v1/mcp/oauth/protected-resource"
+            assert challenge_response.headers["www-authenticate"] == f'Bearer resource_metadata="{metadata_path}"'
+            prm = client.get(metadata_path)
+            assert prm.status_code == 200
+            issuer = f"http://testserver{prefix}/v1/mcp/oauth"
+            assert prm.json()["authorization_servers"] == [issuer]
+            asm = client.get(f"/.well-known/oauth-authorization-server{prefix}/v1/mcp/oauth")
+            assert asm.status_code == 200
+            assert asm.json()["issuer"] == issuer
+            assert asm.json()["authorization_endpoint"] == f"{issuer}/authorize"
+            assert asm.json()["token_endpoint"] == f"{issuer}/token"
+        assert client.get("/.well-known/oauth-authorization-server/unknown/v1/mcp/oauth").status_code == 404
+
+
 def test_oauth_authorization_server_metadata(client):
     resp = client.get("/.well-known/oauth-authorization-server")
     assert resp.status_code == 200
@@ -105,15 +187,6 @@ def test_oauth_authorization_server_metadata(client):
     assert data["authorization_endpoint"].endswith("/v1/mcp/oauth/authorize")
     assert data["token_endpoint"].endswith("/v1/mcp/oauth/token")
     assert "S256" in data["code_challenge_methods_supported"]
-
-
-def test_oauth_protected_resource_metadata(client):
-    resp = client.get("/.well-known/oauth-protected-resource")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "resource" in data
-    assert "authorization_servers" in data
-    assert len(data["authorization_servers"]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -501,7 +574,7 @@ async def test_check_byok_credential_no_user_id():
 
 
 @pytest.mark.asyncio
-async def test_check_byok_credential_missing_credential():
+async def test_check_byok_credential_missing_credential(monkeypatch):
     """BYOK server with a known user but no stored credential → 401."""
     from litellm.proxy._experimental.mcp_server.server import _check_byok_credential
     from litellm.proxy._types import UserAPIKeyAuth
@@ -515,6 +588,11 @@ async def test_check_byok_credential_missing_credential():
     )
     user_auth = UserAPIKeyAuth(user_id="user-99", api_key="sk-test")
 
+    from litellm.proxy._experimental.mcp_server import server as server_module
+
+    monkeypatch.delenv("PROXY_BASE_URL", raising=False)
+    monkeypatch.delenv("SERVER_ROOT_PATH", raising=False)
+    monkeypatch.setattr(server_module, "_byok_cred_cache", {})
     mock_prisma = MagicMock()
 
     with (
@@ -526,6 +604,10 @@ async def test_check_byok_credential_missing_credential():
     ):
         with pytest.raises(HTTPException) as exc_info:
             await _check_byok_credential(server, user_auth)
+        with pytest.raises(HTTPException) as cached_exc:
+            await _check_byok_credential(server, user_auth)
+        assert cached_exc.value.status_code == 401
+        assert cached_exc.value.headers == exc_info.value.headers
 
     assert exc_info.value.status_code == 401
     detail: Any = exc_info.value.detail
@@ -533,7 +615,38 @@ async def test_check_byok_credential_missing_credential():
     assert detail["server_id"] == "byok-2"
     headers = exc_info.value.headers or {}
     assert "WWW-Authenticate" in headers  # type: ignore[operator]
-    assert "oauth-protected-resource" in headers["WWW-Authenticate"]  # type: ignore[index]
+    assert headers["WWW-Authenticate"] == 'Bearer resource_metadata="/v1/mcp/oauth/protected-resource"'
+
+
+@pytest.mark.asyncio
+async def test_execute_byok_tool_missing_credential_advertises_api_key_flow(monkeypatch):
+    from datetime import datetime, timezone
+
+    from litellm.proxy._experimental.mcp_server import server as mcp_module
+    from litellm.proxy import proxy_server
+    from litellm.proxy._types import UserAPIKeyAuth
+    from litellm.types.mcp_server.mcp_server_manager import MCPServer
+
+    monkeypatch.setenv("PROXY_BASE_URL", "https://gateway.example.com/proxy")
+    monkeypatch.setattr(mcp_module, "_byok_cred_cache", {})
+    server = MCPServer(server_id="byok-discovery", name="byok-discovery", transport=MCPTransport.http, is_byok=True)
+    prisma = MagicMock()
+    prisma.db.litellm_mcpusercredentials.find_unique = AsyncMock(return_value=None)
+    monkeypatch.setattr(proxy_server, "prisma_client", prisma)
+    with pytest.raises(HTTPException) as exc_info:
+        await mcp_module.execute_mcp_tool(
+            name="list_regions",
+            arguments={},
+            allowed_mcp_servers=[server],
+            requested_server_id=server.server_id,
+            start_time=datetime.now(timezone.utc),
+            user_api_key_auth=UserAPIKeyAuth(user_id="byok-discovery-user"),
+        )
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail["server_id"] == server.server_id
+    assert exc_info.value.headers == {
+        "WWW-Authenticate": 'Bearer resource_metadata="https://gateway.example.com/proxy/v1/mcp/oauth/protected-resource"'
+    }
 
 
 @pytest.mark.asyncio
@@ -1135,3 +1248,584 @@ def test_validate_loopback_redirect_uri_rejects_malformed_cleanly():
     with pytest.raises(HTTPException) as exc:
         validate_loopback_redirect_uri("http://[not-an-ip]/cb")
     assert exc.value.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# validate_trusted_redirect_uri — same-origin + loopback + env allowlist
+# ---------------------------------------------------------------------------
+
+
+def _make_trusted_request(base_url: str = "https://llm.example.com/"):
+    """Build a request-like object whose same-origin is ``base_url``.
+
+    ``get_request_base_url`` defers to ``request.base_url`` unless the
+    caller is a trusted proxy, so passing the target origin as
+    ``base_url`` is sufficient here — no X-Forwarded headers needed.
+    """
+    from unittest.mock import MagicMock
+
+    mock = MagicMock()
+    mock.base_url = base_url
+    mock.headers = {}
+    return mock
+
+
+def test_validate_trusted_redirect_uri_accepts_same_origin():
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    req = _make_trusted_request("https://llm.example.com/")
+    validate_trusted_redirect_uri(req, "https://llm.example.com/ui/mcp/callback")
+
+
+def test_validate_trusted_redirect_uri_same_origin_normalizes_default_port():
+    """Regression: a load balancer that sets X-Forwarded-Port: 443 would
+    otherwise produce a proxy_base of ``https://llm.example.com:443``
+    which wouldn't literally match the browser's port-less ``llm.example.com``
+    redirect_uri even though both represent the same origin."""
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    # Proxy base with explicit :443 — redirect_uri without a port.
+    req = _make_trusted_request("https://llm.example.com:443/")
+    validate_trusted_redirect_uri(req, "https://llm.example.com/cb")
+
+    # And the symmetric case — redirect_uri has the explicit port.
+    req2 = _make_trusted_request("https://llm.example.com/")
+    validate_trusted_redirect_uri(req2, "https://llm.example.com:443/cb")
+
+
+def test_validate_trusted_redirect_uri_accepts_loopback():
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    req = _make_trusted_request("https://llm.example.com/")
+    for uri in (
+        "http://localhost:3000/cb",
+        "http://127.0.0.1:3000/cb",
+        "http://127.0.0.55/cb",
+        "http://[::1]/cb",
+    ):
+        validate_trusted_redirect_uri(req, uri)
+
+
+def test_validate_trusted_redirect_uri_rejects_cross_origin_by_default(
+    monkeypatch,
+):
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    monkeypatch.delenv("MCP_TRUSTED_REDIRECT_ORIGINS", raising=False)
+    req = _make_trusted_request("https://llm.example.com/")
+    with pytest.raises(HTTPException) as exc:
+        validate_trusted_redirect_uri(req, "https://attacker.example.net/cb")
+    assert exc.value.status_code == 400
+
+
+def test_validate_trusted_redirect_uri_rejects_fragment_and_bad_scheme():
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    req = _make_trusted_request("https://llm.example.com/")
+    for uri in (
+        "https://llm.example.com/cb#frag",  # fragment
+        "ftp://llm.example.com/cb",  # unsupported scheme
+        "https:///no-netloc",  # missing netloc
+    ):
+        with pytest.raises(HTTPException) as exc:
+            validate_trusted_redirect_uri(req, uri)
+        assert exc.value.status_code == 400, uri
+
+
+def test_validate_trusted_redirect_uri_accepts_cursor_native_callback():
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    req = _make_trusted_request("http://localhost:4000/")
+    validate_trusted_redirect_uri(req, "cursor://anysphere.cursor-mcp/oauth/callback")
+
+
+def test_validate_trusted_redirect_uri_rejects_unlisted_native_callback(
+    monkeypatch,
+):
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    monkeypatch.setenv("MCP_TRUSTED_NATIVE_REDIRECT_URIS", "")
+    # Clear defaults by patching — env-only path for this test
+    monkeypatch.setattr(
+        "litellm.proxy._experimental.mcp_server.oauth_utils._DEFAULT_NATIVE_REDIRECT_URIS",
+        [],
+    )
+    req = _make_trusted_request("http://localhost:4000/")
+    with pytest.raises(HTTPException) as exc:
+        validate_trusted_redirect_uri(
+            req, "cursor://anysphere.cursor-mcp/oauth/callback"
+        )
+    assert exc.value.status_code == 400
+
+
+def test_validate_trusted_redirect_uri_accepts_env_native_redirect_uri(
+    monkeypatch,
+):
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    monkeypatch.setattr(
+        "litellm.proxy._experimental.mcp_server.oauth_utils._DEFAULT_NATIVE_REDIRECT_URIS",
+        [],
+    )
+    monkeypatch.setenv(
+        "MCP_TRUSTED_NATIVE_REDIRECT_URIS",
+        "vscode://my-app/oauth/callback",
+    )
+    req = _make_trusted_request("http://localhost:4000/")
+    validate_trusted_redirect_uri(req, "vscode://my-app/oauth/callback")
+
+
+def test_validate_trusted_redirect_uri_rejects_native_callback_with_fragment():
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    req = _make_trusted_request("http://localhost:4000/")
+    with pytest.raises(HTTPException) as exc:
+        validate_trusted_redirect_uri(
+            req, "cursor://anysphere.cursor-mcp/oauth/callback#frag"
+        )
+    assert exc.value.status_code == 400
+
+
+def test_validate_trusted_redirect_uri_rejects_native_callback_with_query():
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    req = _make_trusted_request("http://localhost:4000/")
+    with pytest.raises(HTTPException) as exc:
+        validate_trusted_redirect_uri(
+            req,
+            "cursor://anysphere.cursor-mcp/oauth/callback?injected=anything",
+        )
+    assert exc.value.status_code == 400
+
+
+def test_validate_trusted_redirect_uri_native_path_case_insensitive(monkeypatch):
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    monkeypatch.setattr(
+        "litellm.proxy._experimental.mcp_server.oauth_utils._DEFAULT_NATIVE_REDIRECT_URIS",
+        [],
+    )
+    monkeypatch.setenv(
+        "MCP_TRUSTED_NATIVE_REDIRECT_URIS",
+        "myapp://host/MyPath",
+    )
+    req = _make_trusted_request("http://localhost:4000/")
+    validate_trusted_redirect_uri(req, "myapp://host/MyPath")
+
+
+def test_validate_trusted_redirect_uri_native_wildcard_respects_path_boundary(
+    monkeypatch,
+):
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    monkeypatch.setattr(
+        "litellm.proxy._experimental.mcp_server.oauth_utils._DEFAULT_NATIVE_REDIRECT_URIS",
+        [],
+    )
+    monkeypatch.setenv(
+        "MCP_TRUSTED_NATIVE_REDIRECT_URIS",
+        "cursor://anysphere.cursor-mcp/oauth/callback*",
+    )
+    req = _make_trusted_request("http://localhost:4000/")
+    validate_trusted_redirect_uri(
+        req, "cursor://anysphere.cursor-mcp/oauth/callback/extra"
+    )
+    with pytest.raises(HTTPException):
+        validate_trusted_redirect_uri(
+            req, "cursor://anysphere.cursor-mcp/oauth/callback-2"
+        )
+
+
+def test_validate_trusted_redirect_uri_native_wildcard_directory_prefix(
+    monkeypatch,
+):
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    monkeypatch.setattr(
+        "litellm.proxy._experimental.mcp_server.oauth_utils._DEFAULT_NATIVE_REDIRECT_URIS",
+        [],
+    )
+    monkeypatch.setenv(
+        "MCP_TRUSTED_NATIVE_REDIRECT_URIS",
+        "cursor://anysphere.cursor-mcp/oauth/*",
+    )
+    req = _make_trusted_request("http://localhost:4000/")
+    validate_trusted_redirect_uri(req, "cursor://anysphere.cursor-mcp/oauth/callback")
+
+
+def test_validate_trusted_redirect_uri_rejects_scheme_mismatch_on_same_host():
+    """Regression: an attacker who can serve http on the proxy's own
+    host (e.g. by MITMing an unencrypted LAN hop) must not be able to
+    pass same-origin validation — scheme must match as well as host."""
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    req = _make_trusted_request("https://llm.example.com/")
+    with pytest.raises(HTTPException) as exc:
+        validate_trusted_redirect_uri(req, "http://llm.example.com/ui/callback")
+    assert exc.value.status_code == 400
+
+
+def test_validate_trusted_redirect_uri_rejects_userinfo(monkeypatch):
+    """VERIA finding: an attacker can hide the real destination host in
+    the post-``@`` portion of the URL, while the pre-``@`` userinfo is
+    styled to look like an allowlisted host. Without an explicit
+    username/password check, a wildcard allowlist that splits the raw
+    netloc on ``:`` sees ``app.example.com`` and accepts; the browser
+    then navigates to ``attacker.example`` with the authorization code.
+
+    Reject userinfo at every tier — same-origin, loopback, exact-entry
+    allowlist, and wildcard allowlist — so the bypass is closed on
+    every path through the validator.
+    """
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    # (1) Wildcard allowlist — the original VERIA vector, including the
+    # ``:443`` inside userinfo that makes the raw netloc split deceptive.
+    monkeypatch.setenv("MCP_TRUSTED_REDIRECT_ORIGINS", "*.example.com")
+    req = _make_trusted_request("https://llm.other-proxy.com/")
+    for uri in (
+        "https://app.example.com:443@attacker.example/cb",
+        "https://app.example.com@attacker.example/cb",
+    ):
+        with pytest.raises(HTTPException) as exc:
+            validate_trusted_redirect_uri(req, uri)
+        assert exc.value.status_code == 400, uri
+
+    # (2) Exact-entry allowlist — same class of bypass, different path.
+    monkeypatch.setenv("MCP_TRUSTED_REDIRECT_ORIGINS", "app.example.com")
+    req = _make_trusted_request("https://llm.other-proxy.com/")
+    with pytest.raises(HTTPException) as exc:
+        validate_trusted_redirect_uri(
+            req, "https://app.example.com@attacker.example/cb"
+        )
+    assert exc.value.status_code == 400
+
+    # (3) Same-origin path — userinfo that mimics the proxy's host.
+    monkeypatch.delenv("MCP_TRUSTED_REDIRECT_ORIGINS", raising=False)
+    req = _make_trusted_request("https://llm.example.com/")
+    with pytest.raises(HTTPException) as exc:
+        validate_trusted_redirect_uri(
+            req, "https://llm.example.com@attacker.example/cb"
+        )
+    assert exc.value.status_code == 400
+
+    # (4) Loopback path — userinfo that mimics 127.0.0.1.
+    req = _make_trusted_request("https://llm.example.com/")
+    with pytest.raises(HTTPException) as exc:
+        validate_trusted_redirect_uri(req, "http://127.0.0.1@attacker.example/cb")
+    assert exc.value.status_code == 400
+
+
+def test_validate_trusted_redirect_uri_rejects_backslash_in_netloc(monkeypatch):
+    """VERIA finding: urlparse keeps backslashes in ``netloc``, but
+    browsers normalize ``\\`` to ``/`` on http(s) URLs and treat it as
+    the start of the path. An allowlist of ``*.example.com`` would
+    accept ``https://attacker.net\\app.example.com/cb`` (the raw netloc
+    ends with ``.example.com``) while the browser navigates to
+    ``attacker.net`` and delivers the authorization code there.
+
+    Reject on every path through the validator — same-origin,
+    exact-entry, and wildcard — by bouncing the netloc before any
+    matching runs.
+    """
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    # (1) Wildcard allowlist — the VERIA vector.
+    monkeypatch.setenv("MCP_TRUSTED_REDIRECT_ORIGINS", "*.example.com")
+    req = _make_trusted_request("https://llm.other-proxy.com/")
+    with pytest.raises(HTTPException) as exc:
+        validate_trusted_redirect_uri(req, "https://attacker.net\\app.example.com/cb")
+    assert exc.value.status_code == 400
+
+    # (2) Exact-entry allowlist — same split, different match path.
+    monkeypatch.setenv("MCP_TRUSTED_REDIRECT_ORIGINS", "app.example.com")
+    req = _make_trusted_request("https://llm.other-proxy.com/")
+    with pytest.raises(HTTPException) as exc:
+        validate_trusted_redirect_uri(req, "https://attacker.net\\app.example.com/cb")
+    assert exc.value.status_code == 400
+
+    # (3) Same-origin path — backslash that mimics the proxy's host.
+    monkeypatch.delenv("MCP_TRUSTED_REDIRECT_ORIGINS", raising=False)
+    req = _make_trusted_request("https://llm.example.com/")
+    with pytest.raises(HTTPException) as exc:
+        validate_trusted_redirect_uri(req, "https://attacker.net\\llm.example.com/cb")
+    assert exc.value.status_code == 400
+
+
+def test_validate_trusted_redirect_uri_allowlist_entry_with_default_port(monkeypatch):
+    """Regression: operators who write ``app.example.com:443`` in
+    ``MCP_TRUSTED_REDIRECT_ORIGINS`` (natural when copy-pasting from a
+    browser address bar or load-balancer log) must still match a
+    port-less redirect_uri. The redirect_uri's ``:443`` is normalized
+    away for the same-origin compare; the allowlist side has to apply
+    the same normalization or the comparison is asymmetric and silently
+    fails."""
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        _parse_trusted_redirect_origins,
+        validate_trusted_redirect_uri,
+    )
+
+    monkeypatch.setenv("MCP_TRUSTED_REDIRECT_ORIGINS", "app.example.com:443")
+    # Verify the parse step itself drops the default port.
+    assert _parse_trusted_redirect_origins() == ["app.example.com"]
+
+    req = _make_trusted_request("https://llm.example.com/")
+    # Port-less redirect_uri — should match the :443 env entry.
+    validate_trusted_redirect_uri(req, "https://app.example.com/cb")
+    # Explicit :443 on both sides — should still match.
+    validate_trusted_redirect_uri(req, "https://app.example.com:443/cb")
+    # Non-default port on the redirect_uri — must NOT match a default-port entry.
+    with pytest.raises(HTTPException):
+        validate_trusted_redirect_uri(req, "https://app.example.com:8443/cb")
+
+
+def test_validate_trusted_redirect_uri_accepts_exact_allowlisted_host(monkeypatch):
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    monkeypatch.setenv(
+        "MCP_TRUSTED_REDIRECT_ORIGINS",
+        "app.example.com, https://other.example.com/",
+    )
+    req = _make_trusted_request("https://llm.example.com/")
+    # Exact allowlisted host — accepted.
+    validate_trusted_redirect_uri(req, "https://app.example.com/oauth/cb")
+    # Path component on the env entry should be stripped at parse time;
+    # the URL still resolves to an allowlisted host.
+    validate_trusted_redirect_uri(req, "https://other.example.com/anything")
+    # An unrelated host still fails.
+    with pytest.raises(HTTPException):
+        validate_trusted_redirect_uri(req, "https://different.example.com/cb")
+
+
+def test_validate_trusted_redirect_uri_allowlist_rejects_http_even_on_listed_host(
+    monkeypatch,
+):
+    """An attacker must not be able to elevate to the allowlist by
+    serving http:// on the listed host — only https is accepted for
+    non-loopback allowlist entries."""
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    monkeypatch.setenv("MCP_TRUSTED_REDIRECT_ORIGINS", "app.example.com")
+    req = _make_trusted_request("https://llm.example.com/")
+    with pytest.raises(HTTPException) as exc:
+        validate_trusted_redirect_uri(req, "http://app.example.com/cb")
+    assert exc.value.status_code == 400
+
+
+def test_validate_trusted_redirect_uri_wildcard_allowlist(monkeypatch):
+    """``*.suffix`` entries match any strictly-deeper subdomain of
+    ``suffix`` but must not match the bare suffix, nor unrelated domains
+    that happen to end with the same characters."""
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    monkeypatch.setenv("MCP_TRUSTED_REDIRECT_ORIGINS", "*.example.com")
+    req = _make_trusted_request("https://llm.other-proxy.com/")
+
+    # Direct subdomain — accepted.
+    validate_trusted_redirect_uri(req, "https://app.example.com/cb")
+    # Nested subdomain — accepted.
+    validate_trusted_redirect_uri(req, "https://foo.bar.example.com/cb")
+
+    # Bare suffix — NOT accepted (wildcard requires a proper subdomain).
+    with pytest.raises(HTTPException):
+        validate_trusted_redirect_uri(req, "https://example.com/cb")
+
+    # Similar-looking domain that isn't a subdomain — NOT accepted.
+    with pytest.raises(HTTPException):
+        validate_trusted_redirect_uri(req, "https://evil-example.com/cb")
+    with pytest.raises(HTTPException):
+        validate_trusted_redirect_uri(req, "https://example.com.attacker.net/cb")
+
+
+def test_validate_trusted_redirect_uri_wildcard_rejects_http(monkeypatch):
+    """The https-only gate applies to wildcard entries too."""
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    monkeypatch.setenv("MCP_TRUSTED_REDIRECT_ORIGINS", "*.example.com")
+    req = _make_trusted_request("https://llm.other-proxy.com/")
+    with pytest.raises(HTTPException) as exc:
+        validate_trusted_redirect_uri(req, "http://app.example.com/cb")
+    assert exc.value.status_code == 400
+
+
+def test_validate_trusted_redirect_uri_wildcard_host_with_port_still_matches(
+    monkeypatch,
+):
+    """Wildcard entries don't express port constraints — an allowlisted
+    subdomain should match regardless of explicit port on the URL."""
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    monkeypatch.setenv("MCP_TRUSTED_REDIRECT_ORIGINS", "*.example.com")
+    req = _make_trusted_request("https://llm.other-proxy.com/")
+    validate_trusted_redirect_uri(req, "https://app.example.com:8443/cb")
+
+
+def test_validate_trusted_redirect_uri_accepts_ipv6_loopback_with_default_port():
+    """IPv6 loopback with explicit ``:443`` on an ``https`` URL should
+    still match — exercises ``_strip_default_port``'s IPv6 branch."""
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    req = _make_trusted_request("https://[::1]/")
+    validate_trusted_redirect_uri(req, "https://[::1]:443/cb")
+
+
+def test_validate_trusted_redirect_uri_tolerates_malformed_env_entries(monkeypatch):
+    """Operators occasionally mis-type env values (empty items, bare
+    ``*.``, non-numeric ports). None of those should raise; unmatched
+    entries must simply fail to grant access while well-formed entries
+    in the same list continue to work."""
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    monkeypatch.setenv(
+        "MCP_TRUSTED_REDIRECT_ORIGINS",
+        ",  ,*.,  foo:notaport,  app.example.com",
+    )
+    req = _make_trusted_request("https://llm.example.com/")
+    # Well-formed entry still works.
+    validate_trusted_redirect_uri(req, "https://app.example.com/cb")
+    # Bare ``*.`` grants nothing.
+    with pytest.raises(HTTPException):
+        validate_trusted_redirect_uri(req, "https://example.com/cb")
+    # Non-numeric port entry is ignored (doesn't grant access).
+    with pytest.raises(HTTPException):
+        validate_trusted_redirect_uri(req, "https://foo.example.net/cb")
+
+
+def test_validate_trusted_redirect_uri_rejects_wildcard_entry_with_dot_leading_suffix(
+    monkeypatch,
+):
+    """A wildcard entry like ``*..example.com`` has a suffix that starts
+    with ``.``, which would otherwise match ``anything.example.com`` via
+    the ``host.endswith("." + suffix)`` branch by accepting a netloc
+    whose own leading ``.`` makes it look like a deeper subdomain.
+    Operators who mistype an extra dot should get an ignored entry, not
+    a broader match than they intended."""
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    monkeypatch.setenv("MCP_TRUSTED_REDIRECT_ORIGINS", "*..example.com")
+    req = _make_trusted_request("https://llm.example.com/")
+
+    # None of these should resolve against the malformed wildcard entry.
+    for uri in (
+        "https://app.example.com/cb",
+        "https://foo.bar.example.com/cb",
+        "https://example.com/cb",
+    ):
+        with pytest.raises(HTTPException) as exc:
+            validate_trusted_redirect_uri(req, uri)
+        assert exc.value.status_code == 400
+
+
+def test_validate_trusted_redirect_uri_falls_through_when_origin_lookup_fails():
+    """If ``get_request_base_url`` can't determine the proxy's origin,
+    same-origin is skipped silently but loopback + allowlist paths are
+    still reachable."""
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    class _ExplodingRequest:
+        # Accessing ``.base_url`` is what ``get_request_base_url``
+        # reaches for first; raising here lets us exercise the swallowed-
+        # error fallback without monkey-patching imports.
+        base_url = property(lambda self: (_ for _ in ()).throw(RuntimeError("boom")))
+        headers: dict = {}
+
+    req = _ExplodingRequest()
+    # Loopback still accepted despite origin lookup failure.
+    validate_trusted_redirect_uri(req, "http://127.0.0.1:3000/cb")
+
+
+def test_strip_default_port_empty_netloc():
+    """``_strip_default_port("", "")`` should round-trip — validator
+    rejects empty-netloc URLs upstream so this is purely a defensive
+    contract on the helper itself."""
+    from litellm.proxy._experimental.mcp_server.oauth_utils import _strip_default_port
+
+    assert _strip_default_port("https", "") == ""
+
+
+def test_strip_default_port_handles_non_numeric_port():
+    """Raw netloc with a non-numeric port is returned unchanged. Reached
+    in practice when a malformed ``Host`` header survives upstream
+    parsing — we stay out of its way rather than 500ing."""
+    from litellm.proxy._experimental.mcp_server.oauth_utils import _strip_default_port
+
+    assert _strip_default_port("https", "foo.com:bar") == "foo.com:bar"
+    assert _strip_default_port("https", "[::1]:bar") == "[::1]:bar"
+
+
+def test_validate_trusted_redirect_uri_rejects_public_ip_without_allowlist():
+    """A redirect_uri whose host is a public IP (parseable by
+    ``ip_address`` but not loopback) must fail all three tiers and 400."""
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        validate_trusted_redirect_uri,
+    )
+
+    req = _make_trusted_request("https://llm.example.com/")
+    with pytest.raises(HTTPException) as exc:
+        validate_trusted_redirect_uri(req, "https://1.2.3.4/cb")
+    assert exc.value.status_code == 400
+
+
+def test_parse_trusted_redirect_origins_drops_bare_path_entries(monkeypatch):
+    """``/foo`` has a scheme-less leading slash and would strip to the
+    empty string — drop silently rather than allowlisting empty
+    origins."""
+    from litellm.proxy._experimental.mcp_server.oauth_utils import (
+        _parse_trusted_redirect_origins,
+    )
+
+    monkeypatch.setenv(
+        "MCP_TRUSTED_REDIRECT_ORIGINS", "https:///, /foo, app.example.com"
+    )
+    # The two malformed entries drop out; only the real host survives.
+    assert _parse_trusted_redirect_origins() == ["app.example.com"]

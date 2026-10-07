@@ -9,12 +9,7 @@ import traceback
 from dotenv import load_dotenv
 
 load_dotenv()
-import os
-import asyncio
 
-sys.path.insert(
-    0, os.path.abspath("../..")
-)  # Adds the parent directory to the system path
 import pytest
 import litellm
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -53,7 +48,7 @@ class TestOpentelemetryUnitTests(BaseLoggingCallbackTest):
         litellm.callbacks = ["otel"]
 
         await litellm.acompletion(
-            model="gpt-3.5-turbo",
+            model="gpt-5-mini",
             messages=[{"role": "user", "content": "Hello, world!"}],
             mock_response="Hey!",
             metadata={"litellm_parent_otel_span": parent_otel_span},

@@ -1,24 +1,17 @@
 import json
-import os
-import sys
 from datetime import datetime
 from unittest.mock import AsyncMock
 
-sys.path.insert(
-    0, os.path.abspath("../..")
-)  # Adds the parent directory to the system path
 
 
 import httpx
 import pytest
-from respx import MockRouter
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock
 
 import litellm
 from litellm import Choices, Message, ModelResponse, EmbeddingResponse, Usage
 from litellm import completion
 from base_rerank_unit_tests import BaseLLMRerankTest
-import litellm
 
 
 def test_completion_nvidia_nim():
@@ -70,27 +63,39 @@ def test_embedding_nvidia_nim():
     litellm.set_verbose = True
     from openai import OpenAI
 
+    captured_bodies = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3]}],
+                "model": "nvidia/nv-embedqa-e5-v5",
+                "usage": {"prompt_tokens": 6, "total_tokens": 6},
+            },
+        )
+
     client = OpenAI(
         api_key="fake-api-key",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
-    with patch.object(client.embeddings.with_raw_response, "create") as mock_client:
-        try:
-            litellm.embedding(
-                model="nvidia_nim/nvidia/nv-embedqa-e5-v5",
-                input="What is the meaning of life?",
-                input_type="passage",
-                dimensions=1024,
-                client=client,
-            )
-        except Exception as e:
-            print(e)
-        mock_client.assert_called_once()
-        request_body = mock_client.call_args.kwargs
-        print("request_body: ", request_body)
-        assert request_body["input"] == "What is the meaning of life?"
-        assert request_body["model"] == "nvidia/nv-embedqa-e5-v5"
-        assert request_body["extra_body"]["input_type"] == "passage"
-        assert request_body["dimensions"] == 1024
+    response = litellm.embedding(
+        model="nvidia_nim/nvidia/nv-embedqa-e5-v5",
+        input="What is the meaning of life?",
+        input_type="passage",
+        dimensions=1024,
+        client=client,
+    )
+    request_body = captured_bodies[0]
+    print("request_body: ", request_body)
+    assert request_body["input"] == "What is the meaning of life?"
+    assert request_body["model"] == "nvidia/nv-embedqa-e5-v5"
+    assert request_body["input_type"] == "passage"
+    assert request_body["dimensions"] == 1024
+    assert "encoding_format" not in request_body
+    assert response.data[0]["embedding"] == [0.1, 0.2, 0.3]
 
 
 def test_chat_completion_nvidia_nim_with_tools():
@@ -263,3 +268,44 @@ class TestNvidiaNim(BaseLLMRerankTest):
     def get_expected_cost(self) -> float:
         """Nvidia NIM rerank models are free (cost = 0.0)"""
         return 0.0
+
+    @pytest.mark.asyncio()
+    @pytest.mark.parametrize("sync_mode", [True, False])
+    async def test_basic_rerank(self, sync_mode, monkeypatch):
+        """
+        Override the base live rerank test with a mocked HTTP layer.
+
+        NVIDIA reached end-of-life for the hosted
+        nvidia/llama-3.2-nv-rerankqa-1b-v2 rerank API on 2026-05-18 and
+        published no replacement model, so a live call now returns HTTP 410
+        ("Gone"). NVIDIA's hosted catalog rotates on a schedule, so pointing
+        at another live model would only defer the same failure. Mock the
+        transport instead (same pattern as
+        test_nvidia_nim_rerank_ranking_endpoint above) so the request/response
+        transformation and cost calculation stay covered offline.
+        """
+        monkeypatch.setenv("NVIDIA_NIM_API_KEY", "fake-api-key")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.text = ""
+        mock_response.json.return_value = {
+            "rankings": [
+                {"index": 0, "logit": 0.95},
+                {"index": 1, "logit": 0.75},
+            ],
+            "usage": {"total_tokens": 7},
+        }
+
+        with (
+            patch(
+                "litellm.llms.custom_httpx.http_handler.HTTPHandler.post",
+                return_value=mock_response,
+            ),
+            patch(
+                "litellm.llms.custom_httpx.http_handler.AsyncHTTPHandler.post",
+                return_value=mock_response,
+            ),
+        ):
+            await super().test_basic_rerank(sync_mode=sync_mode)

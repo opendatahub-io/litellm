@@ -8,12 +8,9 @@ Reference: https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-se
 """
 
 import json
-import os
-import sys
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 
-sys.path.insert(0, os.path.abspath("../../.."))
 
 import pytest
 import litellm
@@ -98,9 +95,9 @@ class BaseAnthropicMessagesToolSearchTest(ABC):
         Returns the model string to use for tests.
 
         Examples:
-        - "anthropic/claude-sonnet-4-20250514"
-        - "vertex_ai/claude-sonnet-4@20250514"
-        - "bedrock/invoke/anthropic.claude-sonnet-4-20250514-v1:0"
+        - "anthropic/claude-sonnet-4-5-20250929"
+        - "vertex_ai/claude-sonnet-4-5@20250929"
+        - "bedrock/invoke/anthropic.claude-sonnet-4-5-20250929-v1:0"
         """
         pass
 

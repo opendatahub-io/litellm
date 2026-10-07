@@ -1,14 +1,9 @@
 import os
-import sys
 import traceback
 
 import litellm.cost_calculator
 
-sys.path.insert(
-    0, os.path.abspath("../..")
-)  # Adds the parent directory to the system path
 import asyncio
-import os
 import time
 from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -625,16 +620,8 @@ def test_vertex_ai_completion_cost():
     print("calculated_input_cost: {}".format(calculated_input_cost))
 
 
-@pytest.mark.skip(reason="new test - WIP, working on fixing this")
 def test_vertex_ai_medlm_completion_cost():
     """Test for medlm completion cost ."""
-
-    with pytest.raises(Exception) as e:
-        model = "vertex_ai/medlm-medium"
-        messages = [{"role": "user", "content": "Test MedLM completion cost."}]
-        predictive_cost = completion_cost(
-            model=model, messages=messages, custom_llm_provider="vertex_ai"
-        )
 
     os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
     litellm.model_cost = litellm.get_model_cost_map(url="")
@@ -1097,7 +1084,7 @@ def test_completion_cost_databricks(model):
     litellm._turn_on_debug()
     os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
     litellm.model_cost = litellm.get_model_cost_map(url="")
-    model, messages = model, [{"role": "user", "content": "What is 2+2?"}]
+    messages = [{"role": "user", "content": "What is 2+2?"}]
 
     resp = litellm.completion(model=model, messages=messages)  # works fine
 
@@ -1171,7 +1158,7 @@ from litellm.llms.fireworks_ai.cost_calculator import get_base_model_for_pricing
 @pytest.mark.parametrize(
     "model, base_model",
     [
-        ("fireworks_ai/llama-v3p3-70b-instruct", "fireworks-ai-above-16b"),
+        ("fireworks_ai/llama-v3p1-70b-instruct", "fireworks-ai-above-16b"),
     ],
 )
 def test_get_model_params_fireworks_ai(model, base_model):
@@ -1182,18 +1169,47 @@ def test_get_model_params_fireworks_ai(model, base_model):
 @pytest.mark.parametrize(
     "model",
     [
-        "fireworks_ai/llama-v3p3-70b-instruct",
+        "fireworks_ai/accounts/fireworks/models/deepseek-v3p1",
     ],
 )
 def test_completion_cost_fireworks_ai(model):
+    """
+    Mocked so it does not depend on Fireworks' rotating serverless catalog.
+    Validates the Fireworks cost path: a parsed response with usage yields a
+    non-zero cost against the local cost map.
+    """
     os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
     litellm.model_cost = litellm.get_model_cost_map(url="")
 
-    messages = [{"role": "user", "content": "Hey, how's it going?"}]
-    resp = litellm.completion(model=model, messages=messages)  # works fine
+    mock_response_data = {
+        "id": "chatcmpl-test",
+        "object": "chat.completion",
+        "created": 1234567890,
+        "model": model.split("fireworks_ai/")[-1],
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "Going great, thanks!"},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 8, "completion_tokens": 5, "total_tokens": 13},
+    }
 
-    print(resp)
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"content-type": "application/json"}
+    mock_response.json.return_value = mock_response_data
+    mock_response.text = json.dumps(mock_response_data)
+
+    sync_handler = HTTPHandler()
+    messages = [{"role": "user", "content": "Hey, how's it going?"}]
+
+    with patch.object(HTTPHandler, "post", return_value=mock_response):
+        resp = litellm.completion(model=model, messages=messages, client=sync_handler)
+
     cost = completion_cost(completion_response=resp)
+    assert cost > 0
 
 
 def test_cost_azure_openai_prompt_caching():
@@ -1450,7 +1466,6 @@ def test_completion_cost_azure_ai_rerank(model):
         },
     )
     print("response", response)
-    model = model
     cost = completion_cost(
         model=model, completion_response=response, call_type="arerank"
     )
@@ -2734,11 +2749,6 @@ def model_item():
 
 
 @pytest.mark.parametrize("base_model_arg", ["litellm_param", "model_info"])
-def test_cost_calculator_with_base_model_with_router(base_model_arg, model_item):
-    from litellm import Router
-
-
-@pytest.mark.parametrize("base_model_arg", ["litellm_param", "model_info"])
 def test_cost_calculator_with_base_model_with_router(base_model_arg):
     from litellm import Router
 
@@ -2850,7 +2860,7 @@ def test_json_valid_model_cost_map():
         json_str = json.dumps(model_cost)
         json.loads(json_str)
     except json.JSONDecodeError as e:
-        assert False, f"Invalid JSON format: {str(e)}"
+        pytest.fail(f"Invalid JSON format: {str(e)}")
 
 
 def test_batch_cost_calculator():

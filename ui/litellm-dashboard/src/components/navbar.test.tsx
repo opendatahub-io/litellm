@@ -1,5 +1,5 @@
 import userEvent from "@testing-library/user-event";
-import React, { useState } from "react";
+import React from "react";
 import { describe, expect, it, vi } from "vitest";
 import { renderWithProviders, screen, waitFor } from "../../tests/test-utils";
 import Navbar from "./navbar";
@@ -37,8 +37,8 @@ vi.mock("./Navbar/UserDropdown/UserDropdown", async (importOriginal) => {
       const [open, setOpen] = useState(false);
       return (
         <div>
-          <button type="button" onClick={() => setOpen(!open)}>
-            User
+          <button type="button" aria-label="Open account menu" onClick={() => setOpen(!open)}>
+            Account
           </button>
           {open && (
             <div data-testid="user-dropdown-content">
@@ -71,7 +71,10 @@ vi.mock("./Navbar/UserDropdown/UserDropdown", async (importOriginal) => {
 });
 
 vi.mock("@/utils/proxyUtils", () => ({
-  fetchProxySettings: vi.fn(),
+  fetchProxySettings: vi.fn().mockResolvedValue({
+    PROXY_BASE_URL: "",
+    PROXY_LOGOUT_URL: "https://example.com/logout",
+  }),
 }));
 
 // Mock CommunityEngagementButtons component
@@ -92,7 +95,7 @@ vi.mock("./Navbar/CommunityEngagementButtons/CommunityEngagementButtons", () => 
 let mockUseThemeImpl = () => ({ logoUrl: null as string | null });
 let mockUseHealthReadinessDetailsImpl = () => ({ data: null as any });
 let mockGetLocalStorageItemImpl = (key: string) => null as string | null;
-let mockUseAuthorizedImpl = () => ({
+const mockUseAuthorizedImpl = () => ({
   userId: "test-user",
   userEmail: "test@example.com",
   userRole: "Admin",
@@ -136,30 +139,44 @@ Object.defineProperty(window, "location", {
 
 describe("Navbar", () => {
   const defaultProps = {
-    userID: "test-user",
-    userEmail: "test@example.com",
-    userRole: "Admin",
-    premiumUser: false,
-    proxySettings: {},
-    setProxySettings: vi.fn(),
     accessToken: "test-token",
     isPublicPage: false,
-    isDarkMode: false,
-    toggleDarkMode: vi.fn(),
   };
 
   it("should render without crashing", () => {
     renderWithProviders(<Navbar {...defaultProps} />);
 
+    expect(screen.getByRole("button", { name: /^notifications$/i })).toBeInTheDocument();
     expect(screen.getByText("Docs")).toBeInTheDocument();
-    expect(screen.getByText("User")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /open account menu/i })).toBeInTheDocument();
+  });
+
+  it("should link the logo to the UI home route rather than the proxy origin", () => {
+    renderWithProviders(<Navbar {...defaultProps} />);
+
+    expect(screen.getByRole("link", { name: /litellm brand/i })).toHaveAttribute("href", "/ui");
+  });
+
+  it("pairs the logo with a dark-mode variant that swaps on the dark class", () => {
+    renderWithProviders(<Navbar {...defaultProps} />);
+
+    const [light, dark] = Array.from(screen.getByRole("link", { name: /litellm brand/i }).querySelectorAll("img"));
+    const classesOf = (el: Element) => new Set(el.className.split(/\s+/));
+
+    const lightSrc = light.getAttribute("src") ?? "";
+    expect(light).toHaveAttribute("src", expect.stringMatching(/\/get_image$/));
+    expect(dark).toHaveAttribute("src", `${lightSrc}?theme=dark`);
+    expect(classesOf(light).has("dark:hidden")).toBe(true);
+    expect(classesOf(light).has("hidden")).toBe(false);
+    expect(classesOf(dark).has("hidden")).toBe(true);
+    expect(classesOf(dark).has("dark:block")).toBe(true);
   });
 
   it("should display user information in dropdown", async () => {
     const user = userEvent.setup();
     renderWithProviders(<Navbar {...defaultProps} />);
 
-    await user.click(screen.getByText("User"));
+    await user.click(screen.getByRole("button", { name: /open account menu/i }));
 
     await waitFor(() => {
       expect(screen.getByText("test-user")).toBeInTheDocument();
@@ -198,7 +215,7 @@ describe("Navbar", () => {
     });
     renderWithProviders(<Navbar {...defaultProps} />);
 
-    await user.click(screen.getByText("User"));
+    await user.click(screen.getByRole("button", { name: /open account menu/i }));
 
     await waitFor(() => {
       expect(screen.getByText("Premium")).toBeInTheDocument();
@@ -247,14 +264,15 @@ describe("Navbar", () => {
     mockUseThemeImpl = () => ({ logoUrl: null });
   });
 
-  it("should hide user dropdown on public pages", () => {
+  it("should hide user dropdown and notifications on public pages", () => {
     const publicPageProps = { ...defaultProps, isPublicPage: true };
     renderWithProviders(<Navbar {...publicPageProps} />);
 
-    expect(screen.queryByText("User")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /open account menu/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^notifications$/i })).not.toBeInTheDocument();
   });
 
-  it("should handle hide new features toggle", async () => {
+  it("should handle hide new feature indicators toggle", async () => {
     const user = userEvent.setup();
 
     // Initially disabled
@@ -265,7 +283,7 @@ describe("Navbar", () => {
 
     renderWithProviders(<Navbar {...defaultProps} />);
 
-    await user.click(screen.getByText("User"));
+    await user.click(screen.getByRole("button", { name: /open account menu/i }));
 
     await waitFor(() => {
       expect(screen.getByText("test-user")).toBeInTheDocument();
@@ -290,7 +308,7 @@ describe("Navbar", () => {
 
     renderWithProviders(<Navbar {...defaultProps} />);
 
-    await user.click(screen.getByText("User"));
+    await user.click(screen.getByRole("button", { name: /open account menu/i }));
 
     await waitFor(() => {
       expect(screen.getByText("test-user")).toBeInTheDocument();
@@ -301,7 +319,9 @@ describe("Navbar", () => {
 
     const cookieUtils = vi.mocked(await import("@/utils/cookieUtils"));
     expect(cookieUtils.clearTokenCookies).toHaveBeenCalled();
-    expect(window.location.href).toBe("");
+    await waitFor(() => {
+      expect(window.location.href).toBe("https://example.com/logout");
+    });
   });
 
   it("should not render dark mode toggle slider", () => {

@@ -1,5 +1,3 @@
-import os
-import sys
 import traceback
 from litellm._uuid import uuid
 
@@ -9,14 +7,10 @@ from fastapi.routing import APIRoute
 
 load_dotenv()
 import io
-import os
 import time
 
 # this file is to test litellm/proxy
 
-sys.path.insert(
-    0, os.path.abspath("../..")
-)  # Adds the parent directory to the system path
 import asyncio
 import datetime
 import json
@@ -91,7 +85,7 @@ def test_spend_logs_payload(model_id: Optional[str]):
                         "content-length": "163",
                     },
                     "endpoint": "http://localhost:4000/chat/completions",
-                    "model_group": "gpt-3.5-turbo",
+                    "model_group": "gpt-5-mini",
                     "deployment": "azure/gpt-4.1-mini",
                     "model_info": {
                         "id": "4bad40a1eb6bebd1682800f16f44b9f06c52a6703444c99c7f9f32e9de3693b4",
@@ -129,7 +123,7 @@ def test_spend_logs_payload(model_id: Optional[str]):
                             },
                             {"role": "user", "content": "bom dia"},
                         ],
-                        "model": "gpt-3.5-turbo",
+                        "model": "gpt-5-mini",
                         "max_tokens": 10,
                     },
                 },
@@ -149,7 +143,6 @@ def test_spend_logs_payload(model_id: Optional[str]):
             "completion_start_time": datetime.datetime(2024, 6, 7, 12, 43, 30, 954146),
             "max_tokens": 10,
             "extra_body": {},
-            "custom_llm_provider": "azure",
             "input": [
                 {"role": "system", "content": "you are a helpful assistant.\n"},
                 {"role": "user", "content": "bom dia"},
@@ -332,7 +325,7 @@ def test_spend_logs_payload_with_prompts_enabled(monkeypatch):
 
     input_args: dict = {
         "kwargs": {
-            "model": "gpt-3.5-turbo",
+            "model": "gpt-5-mini",
             "messages": [{"role": "user", "content": "Hello!"}],
             "litellm_params": {
                 "metadata": {
@@ -349,7 +342,7 @@ def test_spend_logs_payload_with_prompts_enabled(monkeypatch):
                     message=litellm.Message(content="Hi there!", role="assistant"),
                 )
             ],
-            model="gpt-3.5-turbo",
+            model="gpt-5-mini",
             usage=litellm.Usage(completion_tokens=2, prompt_tokens=1, total_tokens=3),
         ),
         "start_time": datetime.datetime.now(),
@@ -372,7 +365,7 @@ def test_spend_logs_payload_with_prompts_enabled(monkeypatch):
     litellm_params = {
         "proxy_server_request": {
             "body": {
-                "model": "gpt-4",
+                "model": "gpt-5.5",
                 "messages": [{"role": "user", "content": "Hello!"}],
             }
         }
@@ -389,7 +382,7 @@ def test_spend_logs_payload_with_prompts_enabled(monkeypatch):
         {"role": "assistant", "content": "Hi there!"}
     )
     proxy_server_request = json.loads(payload["proxy_server_request"] or "{}")
-    assert proxy_server_request["model"] == "gpt-4"
+    assert proxy_server_request["model"] == "gpt-5.5"
     assert proxy_server_request["messages"] == [{"role": "user", "content": "Hello!"}]
 
     # Clean up - reset general_settings
@@ -420,7 +413,7 @@ def test_large_request_no_truncation_threshold():
 
     request_body = {
         "messages": [{"role": "user", "content": large_content}],
-        "model": "gpt-4",
+        "model": "gpt-5.5",
     }
 
     sanitized = _sanitize_request_body_for_spend_logs_payload(request_body)
@@ -454,7 +447,7 @@ def test_small_request_no_truncation():
 
     request_body = {
         "messages": [{"role": "user", "content": small_content}],
-        "model": "gpt-4",
+        "model": "gpt-5.5",
     }
 
     sanitized = _sanitize_request_body_for_spend_logs_payload(request_body)
@@ -497,7 +490,7 @@ def test_configurable_string_length_env_var(monkeypatch):
 
     request_body = {
         "messages": [{"role": "user", "content": large_content}],
-        "model": "gpt-4",
+        "model": "gpt-5.5",
     }
 
     sanitized = _sanitize_request_body_for_spend_logs_payload(request_body)
@@ -531,7 +524,7 @@ def test_truncation_preserves_beginning_and_end():
 
     request_body = {
         "messages": [{"role": "user", "content": large_content}],
-        "model": "gpt-4",
+        "model": "gpt-5.5",
     }
 
     sanitized = _sanitize_request_body_for_spend_logs_payload(request_body)

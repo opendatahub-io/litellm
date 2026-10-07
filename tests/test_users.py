@@ -7,7 +7,6 @@ import time
 from openai import AsyncOpenAI
 from tests.test_team import list_teams
 from typing import Optional
-from tests.test_keys import generate_key
 from fastapi import HTTPException
 
 
@@ -302,14 +301,14 @@ async def test_user_model_access():
             model="good-model",
         )
 
-        with pytest.raises(openai.AuthenticationError):
+        with pytest.raises(openai.PermissionDeniedError):
             await chat_completion(
                 session=session,
                 key=key,
                 model="bedrock/anthropic.claude-3-sonnet-20240229-v1:0",
             )
 
-        with pytest.raises(openai.AuthenticationError):
+        with pytest.raises(openai.PermissionDeniedError):
             await chat_completion(
                 session=session,
                 key=key,
@@ -320,7 +319,6 @@ async def test_user_model_access():
 import json
 from litellm._uuid import uuid
 import pytest
-import aiohttp
 from typing import Dict, Tuple
 
 

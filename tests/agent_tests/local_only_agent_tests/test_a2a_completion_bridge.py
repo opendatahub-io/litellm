@@ -10,13 +10,10 @@ Prerequisites:
     - LangGraph server running on localhost:2024
 """
 
-import os
-import sys
 from uuid import uuid4
 
 import pytest
 
-sys.path.insert(0, os.path.abspath("../.."))
 
 import litellm
 from a2a.types import MessageSendParams, SendMessageRequest, SendStreamingMessageRequest
@@ -54,9 +51,9 @@ async def test_a2a_completion_bridge_non_streaming():
     assert response.jsonrpc == "2.0"
     assert response.id is not None
     assert response.result is not None
-    assert "message" in response.result
+    assert response.result.get("kind") == "message"
 
-    message = response.result["message"]
+    message = response.result
     assert "role" in message
     assert message["role"] == "agent"
     assert "parts" in message

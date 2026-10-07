@@ -2,35 +2,28 @@
 
 import asyncio
 import importlib
-import os
-import sys
 
 import pytest
 
-sys.path.insert(
-    0, os.path.abspath("../..")
-)  # Adds the parent directory to the system path
 import litellm  # noqa: E402,F401
 
-from tests._vcr_conftest_common import (  # noqa: E402
+from tests._vcr_conftest_common import (  # noqa: E402,F401
     VerboseReporterState,
+    _pin_multipart_boundary,
     apply_vcr_auto_marker_to_items,
+    emit_cassette_cache_session_banner,
+    emit_vcr_classification_summary,
+    emit_vcr_diagnostic_log,
+    install_live_call_probe,
     record_vcr_outcome,
     register_persister_if_enabled,
+    reset_vcr_diag_dir,
     vcr_config_dict,
 )
 
 _verbose_state = VerboseReporterState()
 
-
-# Files where VCR replay breaks the test:
-# - ``test_litellm_overhead.py``: asserts overhead/total < 40%, which
-#   inverts when cached replay collapses the upstream time to microseconds.
-_VCR_INCOMPATIBLE_FILES = frozenset(
-    {
-        "test_litellm_overhead.py",
-    }
-)
+_VCR_INCOMPATIBLE_FILES = frozenset()
 
 _VCR_INCOMPATIBLE_NODEID_SUFFIXES: tuple[str, ...] = ()
 
@@ -40,11 +33,7 @@ def setup_and_teardown():
     """
     This fixture reloads litellm before every function. To speed up testing by removing callbacks being chained.
     """
-    sys.path.insert(
-        0, os.path.abspath("../..")
-    )  # Adds the project directory to the system path
 
-    import litellm
 
     importlib.reload(litellm)
 
@@ -76,12 +65,14 @@ def pytest_runtest_makereport(item, call):
 
 @pytest.fixture(autouse=True)
 def _vcr_outcome_gate(request, vcr):
+    install_live_call_probe(request, vcr)
     yield
     record_vcr_outcome(request, vcr)
 
 
 def pytest_configure(config):
     _verbose_state.remember_pluginmanager(config)
+    reset_vcr_diag_dir()
 
 
 def pytest_runtest_logreport(report):
@@ -107,3 +98,9 @@ def pytest_collection_modifyitems(config, items):
 
     # Reorder the items list
     items[:] = custom_logger_tests + other_tests
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    emit_cassette_cache_session_banner(terminalreporter)
+    emit_vcr_classification_summary(terminalreporter)
+    emit_vcr_diagnostic_log(terminalreporter)

@@ -4,9 +4,6 @@
 import sys, os
 import traceback
 
-sys.path.insert(
-    0, os.path.abspath("../..")
-)  # Adds the parent directory to the system path
 import pytest
 import litellm
 from litellm import completion
@@ -49,6 +46,3 @@ def test_multiple_deployments():
     except Exception as e:
         traceback.print_exc()
         pytest.fail(f"An exception occurred: {e}")
-
-
-test_multiple_deployments()

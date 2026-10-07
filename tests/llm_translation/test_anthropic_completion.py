@@ -3,7 +3,6 @@
 
 import asyncio
 import os
-import sys
 import traceback
 
 from dotenv import load_dotenv
@@ -14,11 +13,7 @@ from litellm.llms.anthropic.chat import ModelResponseIterator
 
 load_dotenv()
 import io
-import os
 
-sys.path.insert(
-    0, os.path.abspath("../..")
-)  # Adds the parent directory to the system path
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
@@ -360,7 +355,6 @@ def test_process_anthropic_headers_with_no_matching_headers():
 )
 def test_anthropic_tool_use(tool_type, tool_config, message_content):
     """Test Anthropic tool use with computer use and web fetch tools."""
-    from litellm import completion
 
     litellm._turn_on_debug()
 
@@ -951,7 +945,6 @@ def test_anthropic_citations_api():
     """
     Test the citations API
     """
-    from litellm import completion
 
     try:
         resp = completion(
@@ -997,7 +990,6 @@ def test_anthropic_citations_api():
 
 
 def test_anthropic_citations_api_streaming():
-    from litellm import completion
 
     resp = completion(
         model="claude-sonnet-4-5-20250929",
@@ -1044,7 +1036,6 @@ def test_anthropic_citations_api_streaming():
     ],
 )
 def test_anthropic_thinking_output(model):
-    from litellm import completion
 
     litellm._turn_on_debug()
 
@@ -1111,7 +1102,6 @@ def test_anthropic_thinking_output_stream(model):
 
 
 def test_anthropic_custom_headers():
-    from litellm import completion
     from litellm.llms.custom_httpx.http_handler import HTTPHandler
 
     client = HTTPHandler()
@@ -1379,7 +1369,7 @@ def test_anthropic_mcp_server_tool_use(spec: str):
         ]
 
     params = {
-        "model": "anthropic/claude-sonnet-4-20250514",
+        "model": "anthropic/claude-sonnet-4-5-20250929",
         "messages": [{"role": "user", "content": "Who won the World Cup in 2022?"}],
         "tools": tools,
     }
@@ -1392,7 +1382,7 @@ def test_anthropic_mcp_server_tool_use(spec: str):
 
 
 @pytest.mark.parametrize(
-    "model", ["openai/gpt-4.1", "anthropic/claude-sonnet-4-20250514"]
+    "model", ["openai/gpt-4.1", "anthropic/claude-sonnet-4-5-20250929"]
 )
 @pytest.mark.skipif(
     os.getenv("ZAPIER_CI_CD_MCP_TOKEN") is None, reason="ZAPIER_CI_CD_MCP_TOKEN not set"
@@ -1506,8 +1496,8 @@ def test_anthropic_tool_cache_control():
         }
     ]
 
-    vertex_ai_model = "vertex_ai/claude-sonnet-4@20250514"
-    anthropic_api_model = "claude-sonnet-4-20250514"
+    vertex_ai_model = "vertex_ai/claude-sonnet-4-5@20250929"
+    anthropic_api_model = "claude-sonnet-4-5-20250929"
     result = return_raw_request(
         endpoint=CallTypes.completion,
         kwargs={
@@ -1528,7 +1518,6 @@ def test_anthropic_tool_cache_control():
 
 
 def test_anthropic_streaming():
-    from litellm import completion
 
     request_data = {
         "messages": [

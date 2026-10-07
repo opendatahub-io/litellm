@@ -2,8 +2,12 @@
 Test case normalization in LitellmParams for all guardrail types
 """
 
+from typing import Literal
+
 import pytest
-from litellm.types.guardrails import LitellmParams
+from pydantic import ValidationError
+
+from litellm.types.guardrails import BaseLitellmParams, LitellmParams
 
 
 class TestLitellmParamsCaseNormalization:
@@ -89,3 +93,94 @@ class TestLitellmParamsCaseNormalization:
             )
             assert params.on_disallowed_action in ["block", "rewrite"]
             assert params.on_disallowed_action.islower()
+
+
+class TestOnViolationAcceptedValues:
+    """on_violation is shared by /v1/realtime guardrails and the mcp_security guardrail"""
+
+    @pytest.mark.parametrize("action", ["block", "alert"])
+    def test_mcp_security_policy_template_on_violation_is_accepted(self, action: Literal["block", "alert"]):
+        params = LitellmParams(
+            guardrail="mcp_security",
+            mode="pre_call",
+            default_on=True,
+            on_violation=action,
+        )
+        assert params.on_violation == action
+
+    @pytest.mark.parametrize("action", ["warn", "end_session"])
+    def test_realtime_on_violation_still_accepted(self, action: Literal["warn", "end_session"]):
+        params = LitellmParams(guardrail="presidio", mode="pre_call", on_violation=action)
+        assert params.on_violation == action
+
+    @pytest.mark.parametrize("action", ["block", "alert"])
+    def test_mcp_only_on_violation_is_rejected_for_other_guardrails(self, action: Literal["block", "alert"]):
+        with pytest.raises(ValidationError, match="only supported by guardrail='mcp_security'"):
+            LitellmParams(guardrail="presidio", mode="pre_call", on_violation=action)
+
+    def test_unknown_on_violation_is_rejected(self):
+        with pytest.raises(ValidationError):
+            LitellmParams(guardrail="mcp_security", mode="pre_call", on_violation="ignore")
+
+
+class TestSensitiveDataRoutingValidation:
+    """on_sensitive_data='route' requires a target model to be set"""
+
+    def test_route_with_target_model_is_valid(self):
+        params = LitellmParams(
+            guardrail="presidio",
+            mode="pre_call",
+            on_sensitive_data="route",
+            sensitive_data_route_to_model="on-prem-model",
+        )
+        assert params.on_sensitive_data == "route"
+        assert params.sensitive_data_route_to_model == "on-prem-model"
+
+    def test_route_without_target_model_raises(self):
+        with pytest.raises(ValidationError, match="sensitive_data_route_to_model"):
+            LitellmParams(
+                guardrail="presidio",
+                mode="pre_call",
+                on_sensitive_data="route",
+            )
+
+    def test_base_params_route_without_target_model_raises(self):
+        with pytest.raises(ValidationError, match="sensitive_data_route_to_model"):
+            BaseLitellmParams(on_sensitive_data="route")
+
+    def test_base_params_normalize_on_sensitive_data_case(self):
+        params = BaseLitellmParams(
+            on_sensitive_data="Route",
+            sensitive_data_route_to_model="on-prem-model",
+        )
+        assert params.on_sensitive_data == "route"
+
+    def test_base_params_capitalized_route_without_target_model_raises(self):
+        with pytest.raises(ValidationError, match="sensitive_data_route_to_model"):
+            BaseLitellmParams(on_sensitive_data="ROUTE")
+
+    def test_block_without_target_model_is_valid(self):
+        params = LitellmParams(
+            guardrail="presidio",
+            mode="pre_call",
+            on_sensitive_data="block",
+        )
+        assert params.on_sensitive_data == "block"
+        assert params.sensitive_data_route_to_model is None
+
+    def test_on_sensitive_data_is_case_normalized(self):
+        params = LitellmParams(
+            guardrail="presidio",
+            mode="pre_call",
+            on_sensitive_data="Route",
+            sensitive_data_route_to_model="on-prem-model",
+        )
+        assert params.on_sensitive_data == "route"
+
+    def test_on_sensitive_data_uppercase_block_normalized(self):
+        params = LitellmParams(
+            guardrail="presidio",
+            mode="pre_call",
+            on_sensitive_data="BLOCK",
+        )
+        assert params.on_sensitive_data == "block"

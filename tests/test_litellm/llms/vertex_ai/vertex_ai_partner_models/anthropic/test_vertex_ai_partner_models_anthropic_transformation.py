@@ -1,11 +1,6 @@
-import os
-import sys
 
 import pytest
 
-sys.path.insert(
-    0, os.path.abspath("../../../../../..")
-)  # Adds the parent directory to the system path
 from litellm.anthropic_beta_headers_manager import (
     update_headers_with_filtered_beta,
 )
@@ -675,28 +670,108 @@ def test_sanitize_vertex_anthropic_output_params_unit():
         sanitize_vertex_anthropic_output_params,
     )
 
+    supported = "claude-opus-4-6"
+
     # No-op when output_config absent.
     data: dict = {"max_tokens": 8}
-    sanitize_vertex_anthropic_output_params(data)
+    sanitize_vertex_anthropic_output_params(data, supported)
     assert data == {"max_tokens": 8}
 
-    # Effort-only → preserved (Vertex 4.6/4.7 accept it on rawPredict).
+    # Effort-only on a supporting model → preserved (Vertex 4.6/4.7 accept it).
     data = {"output_config": {"effort": "high"}}
-    sanitize_vertex_anthropic_output_params(data)
+    sanitize_vertex_anthropic_output_params(data, supported)
     assert data["output_config"] == {"effort": "high"}
 
     # Format-only → preserved unchanged.
     fmt = {"format": {"type": "json_schema", "schema": {"type": "object"}}}
     data = {"output_config": dict(fmt)}
-    sanitize_vertex_anthropic_output_params(data)
+    sanitize_vertex_anthropic_output_params(data, supported)
     assert data["output_config"] == fmt
 
-    # Mixed → both effort and format kept (no current Vertex-unsupported keys).
+    # Mixed on a supporting model → both effort and format kept.
     data = {"output_config": {"format": fmt["format"], "effort": "high"}}
-    sanitize_vertex_anthropic_output_params(data)
+    sanitize_vertex_anthropic_output_params(data, supported)
     assert data["output_config"] == {"format": fmt["format"], "effort": "high"}
 
     # Non-dict → dropped defensively.
     data = {"output_config": "garbage"}
-    sanitize_vertex_anthropic_output_params(data)
+    sanitize_vertex_anthropic_output_params(data, supported)
     assert "output_config" not in data
+
+
+def test_sanitize_strips_effort_for_haiku_45():
+    """Regression: Haiku 4.5 on Vertex does not support ``output_config.effort``
+    and 400s with ``Extra inputs are not permitted``. Claude Code injects
+    ``effort`` into every Messages payload, so the helper must strip it for
+    models that don't advertise output_config support while leaving it intact
+    for Opus/Sonnet 4.6+."""
+    from litellm.llms.vertex_ai.vertex_ai_partner_models.anthropic.output_params_utils import (
+        sanitize_vertex_anthropic_output_params,
+    )
+
+    haiku = "claude-haiku-4-5@20251001"
+
+    # Effort-only → output_config removed entirely (no empty dict on the wire).
+    data: dict = {"output_config": {"effort": "high"}, "max_tokens": 8}
+    sanitize_vertex_anthropic_output_params(data, haiku)
+    assert "output_config" not in data
+    assert data["max_tokens"] == 8
+
+    # Mixed → effort stripped, format preserved.
+    fmt = {"type": "json_schema", "schema": {"type": "object"}}
+    data = {"output_config": {"effort": "high", "format": fmt}}
+    sanitize_vertex_anthropic_output_params(data, haiku)
+    assert data["output_config"] == {"format": fmt}
+
+    # Same payload on a supporting model keeps effort untouched.
+    data = {"output_config": {"effort": "high"}}
+    sanitize_vertex_anthropic_output_params(data, "vertex_ai/claude-opus-4-6")
+    assert data["output_config"] == {"effort": "high"}
+
+
+def test_vertex_ai_fable_5_1_response_format_uses_native_output_format(local_model_cost_map):
+    """Regression: Fable 5.1 rejects forced tool use, so the vertex map entry
+    advertises native structured output and ``response_format`` must map to
+    ``output_format`` instead of the tool-based path's forced tool_choice."""
+    config = VertexAIAnthropicConfig()
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "test_schema",
+            "schema": {"type": "object", "properties": {"result": {"type": "string"}}},
+        },
+    }
+
+    result_params = config.map_openai_params(
+        non_default_params={"response_format": response_format},
+        optional_params={},
+        model="claude-fable-5-1",
+        drop_params=False,
+    )
+
+    assert "output_format" in result_params
+    assert "tool_choice" not in result_params
+    assert "tools" not in result_params
+
+
+def test_vertex_ai_anthropic_tool_based_response_format_still_upgrades_legacy_thinking(local_model_cost_map):
+    result_params = VertexAIAnthropicConfig().map_openai_params(
+        non_default_params={
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "test_schema",
+                    "schema": {"type": "object", "properties": {"result": {"type": "string"}}},
+                },
+            },
+            "thinking": {"type": "enabled", "budget_tokens": 4096},
+            "max_tokens": 8192,
+        },
+        optional_params={},
+        model="claude-opus-4-8",
+        drop_params=False,
+    )
+
+    assert "tools" in result_params
+    assert result_params["thinking"] == {"type": "adaptive"}
+    assert result_params["output_config"] == {"effort": "high"}

@@ -1,10 +1,11 @@
 import pytest
+from fastapi import HTTPException
 
+from litellm.exceptions import ModifyResponseException
 from litellm.proxy.guardrails.guardrail_hooks.custom_code.custom_code_guardrail import (
     CustomCodeCompilationError,
     CustomCodeGuardrail,
 )
-
 
 # str.mro() + generator gi_code + code.replace(co_names=...) + __setattr__
 # to swap a function's bytecode and read http_get's real builtins dict.
@@ -151,6 +152,114 @@ async def test_async_guardrail_compiles_and_runs():
         input_type="request",
     )
     assert result["texts"][0] == "test"
+
+
+@pytest.mark.asyncio
+async def test_custom_code_pre_call_block_uses_passthrough():
+    code = (
+        "def apply_guardrail(inputs, request_data, input_type):\n"
+        '    return block("blocked by test")\n'
+    )
+    guardrail = _compile(code)
+
+    with pytest.raises(ModifyResponseException) as exc_info:
+        await guardrail.apply_guardrail(
+            inputs={"texts": ["test"]},
+            request_data={"model": "test-model"},
+            input_type="request",
+        )
+
+    assert exc_info.value.message == "blocked by test"
+    assert exc_info.value.model == "test-model"
+    assert exc_info.value.guardrail_name == "t"
+
+
+@pytest.mark.asyncio
+async def test_custom_code_post_call_block_raises_http_400():
+    code = (
+        "def apply_guardrail(inputs, request_data, input_type):\n"
+        '    return block("blocked by test")\n'
+    )
+    guardrail = _compile(code)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await guardrail.apply_guardrail(
+            inputs={"texts": ["test"]},
+            request_data={"model": "test-model"},
+            input_type="response",
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == {
+        "error": "blocked by test",
+        "guardrail": "t",
+        "detection_info": {},
+    }
+
+
+FLAG_CODE = (
+    "def apply_guardrail(inputs, request_data, input_type):\n"
+    '    return flag("audit hit", metadata={"category": "topic"})\n'
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("input_type", ["request", "response"])
+async def test_custom_code_flag_passes_content_through_and_records_flagged_entry(input_type):
+    """LIT-6894: flag() must not raise, must return the content unchanged and must log
+    exactly one guardrail_flagged entry (the decorator must not add a second "success")."""
+    guardrail = CustomCodeGuardrail(custom_code=FLAG_CODE, guardrail_name="t", event_hook=["pre_call", "post_call"])
+    request_data = {"model": "test-model", "litellm_metadata": {}}
+
+    result = await guardrail.apply_guardrail(
+        inputs={"texts": ["hello"]},
+        request_data=request_data,
+        input_type=input_type,
+    )
+
+    assert result == {"texts": ["hello"]}
+    entries = request_data["litellm_metadata"]["standard_logging_guardrail_information"]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["guardrail_status"] == "guardrail_flagged"
+    assert entry["guardrail_name"] == "t"
+    assert entry["guardrail_mode"] == ["pre_call", "post_call"]
+    assert entry["guardrail_response"] == {
+        "action": "flag",
+        "reason": "audit hit",
+        "input_type": input_type,
+        "metadata": {"category": "topic"},
+    }
+    assert entry["duration"] is not None and entry["duration"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_custom_code_flag_default_reason_and_empty_metadata():
+    code = "def apply_guardrail(inputs, request_data, input_type):\n    return flag('just a note')\n"
+    guardrail = _compile(code)
+    request_data = {"model": "m", "litellm_metadata": {}}
+
+    await guardrail.apply_guardrail(inputs={"texts": ["x"]}, request_data=request_data, input_type="request")
+
+    entry = request_data["litellm_metadata"]["standard_logging_guardrail_information"][0]
+    assert entry["guardrail_response"] == {
+        "action": "flag",
+        "reason": "just a note",
+        "input_type": "request",
+        "metadata": {},
+    }
+
+
+@pytest.mark.asyncio
+async def test_custom_code_allow_still_records_success_not_flagged():
+    code = "def apply_guardrail(inputs, request_data, input_type):\n    return allow()\n"
+    guardrail = _compile(code)
+    request_data = {"model": "m", "litellm_metadata": {}}
+
+    await guardrail.apply_guardrail(inputs={"texts": ["x"]}, request_data=request_data, input_type="request")
+
+    entries = request_data["litellm_metadata"]["standard_logging_guardrail_information"]
+    assert [e["guardrail_status"] for e in entries] == ["success"]
 
 
 def test_typical_sync_guardrail_still_works():

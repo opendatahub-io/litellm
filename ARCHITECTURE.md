@@ -149,7 +149,7 @@ graph TD
 | `parallel_request_limiter` | `proxy/hooks/parallel_request_limiter_v3.py` | Rate limiting per key/user |
 | `cache_control_check` | `proxy/hooks/cache_control_check.py` | Cache validation |
 | `responses_id_security` | `proxy/hooks/responses_id_security.py` | Response ID validation |
-| `litellm_skills` | `proxy/hooks/skills_injection.py` | Skills injection |
+| `litellm_skills` | `proxy/hooks/litellm_skills/main.py` | Skills injection |
 
 To add a new proxy hook, implement `CustomLogger` and register in `PROXY_HOOKS`.
 
@@ -220,25 +220,43 @@ graph LR
 | Job | Interval | Purpose | Key Files |
 |-----|----------|---------|-----------|
 | `update_spend` | 60s | Batch write spend logs to PostgreSQL | `proxy/db/db_spend_update_writer.py` |
-| `reset_budget` | 10-12min | Reset budgets for keys/users/teams | `proxy/management_helpers/budget_reset_job.py` |
+| `reset_budget` | 10-12min | Reset budgets for keys/users/teams | `proxy/common_utils/reset_budget_job.py` |
 | `add_deployment` | 10s | Sync new model deployments from DB | `proxy/proxy_server.py` (`ProxyConfig`) |
-| `cleanup_old_spend_logs` | cron/interval | Delete old spend logs | `proxy/management_helpers/spend_log_cleanup.py` |
-| `check_batch_cost` | 30min | Calculate costs for batch jobs | `proxy/management_helpers/check_batch_cost_job.py` |
-| `check_responses_cost` | 30min | Calculate costs for responses API | `proxy/management_helpers/check_responses_cost_job.py` |
-| `process_rotations` | 1hr | Auto-rotate API keys | `proxy/management_helpers/key_rotation_manager.py` |
+| `cleanup_old_spend_logs` | cron/interval | Delete old spend logs | `proxy/db/db_transaction_queue/spend_log_cleanup.py` |
+| `check_batch_cost` | 30min | Calculate costs for batch jobs | `enterprise/litellm_enterprise/proxy/common_utils/check_batch_cost.py` |
+| `check_responses_cost` | 30min | Calculate costs for responses API | `enterprise/litellm_enterprise/proxy/common_utils/check_responses_cost.py` |
+| `process_rotations` | 1hr | Auto-rotate API keys | `proxy/common_utils/key_rotation_manager.py` |
 | `_run_background_health_check` | continuous | Health check model deployments | `proxy/proxy_server.py` |
 | `send_weekly_spend_report` | weekly | Slack spend alerts | `proxy/utils.py` (`SlackAlerting`) |
 | `send_monthly_spend_report` | monthly | Slack spend alerts | `proxy/utils.py` (`SlackAlerting`) |
 
 **Cost Attribution Flow:**
 1. LLM response returns to `utils.py` wrapper after `litellm.acompletion()` completes
-2. `update_response_metadata()` (`llm_response_utils/response_metadata.py`) is called
-3. `logging_obj._response_cost_calculator()` (`litellm_logging.py`) calculates cost via `litellm.completion_cost()` (`cost_calculator.py`)
+2. `update_response_metadata()` (`litellm_core_utils/llm_response_utils/response_metadata.py`) is called
+3. `logging_obj._response_cost_calculator()` (`litellm_core_utils/litellm_logging.py`) calculates cost via `litellm.completion_cost()` (`cost_calculator.py`)
 4. Cost is stored in `response._hidden_params["response_cost"]`
 5. `proxy/common_request_processing.py` extracts cost from `hidden_params` and adds to response headers (`x-litellm-response-cost`)
 6. `logging_obj.async_success_handler()` triggers callbacks including `_ProxyDBLogger.async_log_success_event()`
 7. `DBSpendUpdateWriter.update_database()` queues spend increments to Redis
 8. Background job `update_spend` flushes queued spend to PostgreSQL every 60s
+
+### Data Access Layer (Models & Repositories)
+
+Database entities and the operations on them live in two packages at the root of `litellm/` so both the gateway (`proxy/`) and the SDK can use them without importing proxy internals:
+
+- `litellm/models/` holds the canonical Pydantic definitions for every persisted entity (`LiteLLM_VerificationToken`, `LiteLLM_TeamTable`, `LiteLLM_UserTable`, etc.). `proxy/_types.py` re-exports these for backwards compatibility, so existing imports keep working.
+- `litellm/repositories/` holds the data-access layer. `BaseRepository[T]` provides the generic CRUD (`find_by_id`, `find_many`, `create`, `update`, `delete`, `count`, `exists`); entity repositories such as `VerificationTokenRepository`, `TeamRepository`, and `UserRepository` add domain-specific queries and writes on top of it.
+
+Conventions to follow when touching this layer:
+
+| Concern | How it's handled |
+|---------|------------------|
+| JSON columns | Prisma `Json` columns are stored as JSON strings. Repositories `json.dumps()` on write and `json.loads()` on read (see `_to_model` and the `_build_*_data` helpers). |
+| Archive-then-delete | `delete_team` / `delete_token` copy the row into the `LiteLLM_Deleted*` table and delete the original inside a single `prisma_client.db.tx()` transaction. Archive payloads are built explicitly so only columns that exist on the archive table are written. |
+| Column vs. field names | Where a model field differs from its DB column (for example `org_id` maps to the `organization_id` column), the repository translates in both directions rather than relying on Pydantic to guess. |
+| Array mutations | Adds use Prisma's atomic `push` (`add_member`, `add_admin`, `add_models`) to avoid read-modify-write races. Removals fall back to read-modify-write because Prisma has no atomic array remove. |
+
+To add a new entity, define the model under `litellm/models/`, re-export it from `proxy/_types.py` if existing code imports it from there, and add a repository under `litellm/repositories/` (subclass `BaseRepository` for plain CRUD, or add bespoke methods when the entity needs encryption, archiving, or atomic array updates). Mirror the tests in `tests/test_litellm/repositories/`.
 
 ---
 

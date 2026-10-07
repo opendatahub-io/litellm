@@ -1,9 +1,7 @@
 import io
 import os
-import sys
 
 
-sys.path.insert(0, os.path.abspath("../.."))
 
 import asyncio
 import litellm
@@ -71,6 +69,48 @@ def setup_vector_store_registry():
             )
         ]
     )
+
+
+@pytest.mark.asyncio
+async def test_vector_store_hook_routes_search_through_proxy_router(
+    setup_vector_store_registry,
+):
+    proxy_router = Mock()
+    proxy_router.avector_store_search = AsyncMock(
+        return_value=VectorStoreSearchResponse(
+            object="vector_store.search_results.page",
+            search_query="what is litellm?",
+            data=[
+                VectorStoreSearchResult(
+                    score=1.0,
+                    content=[VectorStoreResultContent(text="routed context", type="text")],
+                )
+            ],
+        )
+    )
+    logging_obj = Mock()
+    logging_obj.model_call_details = {
+        "litellm_params": {"metadata": {"user_api_key_team_id": "team-a"}}
+    }
+
+    with patch("litellm.proxy.proxy_server.llm_router", proxy_router):
+        _, messages, _ = await VectorStorePreCallHook().async_get_chat_completion_prompt(
+            model="chat-model",
+            messages=[{"role": "user", "content": "what is litellm?"}],
+            non_default_params={"vector_store_ids": ["T37J8R4WTM"]},
+            prompt_id=None,
+            prompt_variables=None,
+            dynamic_callback_params={},
+            litellm_logging_obj=logging_obj,
+        )
+
+    proxy_router.avector_store_search.assert_awaited_once_with(
+        vector_store_id="T37J8R4WTM",
+        query="what is litellm?",
+        custom_llm_provider="bedrock",
+        metadata={"user_api_key_team_id": "team-a"},
+    )
+    assert messages[0]["content"] == "Context:\n\nrouted context\n\n"
 
 
 @pytest.mark.asyncio
@@ -330,6 +370,7 @@ async def test_bedrock_kb_request_body_has_transformed_filters(
         custom_llm_provider,
         litellm_params,
         logging_obj,
+        embedding_executor=None,
         extra_headers=None,
         extra_body=None,
         timeout=None,
@@ -445,7 +486,7 @@ async def test_openai_with_knowledge_base_mock_openai(setup_vector_store_registr
             mock_response.id = "chatcmpl-123"
             mock_response.object = "chat.completion"
             mock_response.created = 1234567890
-            mock_response.model = "gpt-4"
+            mock_response.model = "gpt-5.5"
 
             # Store the request for verification
             captured_request.update(kwargs)
@@ -459,7 +500,7 @@ async def test_openai_with_knowledge_base_mock_openai(setup_vector_store_registr
 
         try:
             await litellm.acompletion(
-                model="gpt-4",
+                model="gpt-5.5",
                 messages=[{"role": "user", "content": "what is litellm?"}],
                 vector_store_ids=["T37J8R4WTM"],
                 client=client,
@@ -521,7 +562,7 @@ async def test_openai_with_vector_store_ids_in_tool_call_mock_openai(
             mock_response.id = "chatcmpl-123"
             mock_response.object = "chat.completion"
             mock_response.created = 1234567890
-            mock_response.model = "gpt-4"
+            mock_response.model = "gpt-5.5"
 
             # Store the request for verification
             captured_request.update(kwargs)
@@ -535,7 +576,7 @@ async def test_openai_with_vector_store_ids_in_tool_call_mock_openai(
 
         try:
             await litellm.acompletion(
-                model="gpt-4",
+                model="gpt-5.5",
                 messages=[{"role": "user", "content": "what is litellm?"}],
                 tools=[{"type": "file_search", "vector_store_ids": ["T37J8R4WTM"]}],
                 client=client,
@@ -594,7 +635,7 @@ async def test_openai_with_mixed_tool_call_mock_openai(setup_vector_store_regist
             mock_response.id = "chatcmpl-123"
             mock_response.object = "chat.completion"
             mock_response.created = 1234567890
-            mock_response.model = "gpt-4"
+            mock_response.model = "gpt-5.5"
 
             # Store the request for verification
             captured_request.update(kwargs)
@@ -608,7 +649,7 @@ async def test_openai_with_mixed_tool_call_mock_openai(setup_vector_store_regist
 
         try:
             await litellm.acompletion(
-                model="gpt-4",
+                model="gpt-5.5",
                 messages=[{"role": "user", "content": "what is litellm?"}],
                 tools=[
                     {"type": "file_search", "vector_store_ids": ["T37J8R4WTM"]},
@@ -642,7 +683,7 @@ async def test_openai_with_mixed_tool_call_mock_openai(setup_vector_store_regist
 #     test_custom_logger = MockCustomLogger()
 #     litellm.set_verbose = True
 #     await litellm.acompletion(
-#         model="gpt-4",
+#         model="gpt-5.5",
 #         messages=[{"role": "user", "content": "what is litellm?"}],
 #         vector_store_ids = [
 #             "T37J8R4WTM"
@@ -834,7 +875,7 @@ async def test_provider_specific_fields_in_proxy_http_response(
 
     # Initialize proxy
     await initialize(
-        model="gpt-3.5-turbo",
+        model="gpt-5-mini",
         alias=None,
         api_base=None,
         debug=False,
@@ -857,7 +898,7 @@ async def test_provider_specific_fields_in_proxy_http_response(
     # Create mock response with provider_specific_fields
     mock_response = litellm.ModelResponse(
         id="test-123",
-        model="gpt-3.5-turbo",
+        model="gpt-5-mini",
         created=1234567890,
         object="chat.completion",
     )
@@ -897,7 +938,7 @@ async def test_provider_specific_fields_in_proxy_http_response(
         response = client.post(
             "/v1/chat/completions",
             json={
-                "model": "gpt-3.5-turbo",
+                "model": "gpt-5-mini",
                 "messages": [{"role": "user", "content": "What is litellm?"}],
             },
         )

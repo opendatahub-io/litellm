@@ -1,4 +1,3 @@
-import sys
 import os
 import io, asyncio
 import json
@@ -7,7 +6,6 @@ import time
 from litellm import mock_completion
 from unittest.mock import MagicMock, AsyncMock, patch
 
-sys.path.insert(0, os.path.abspath("../.."))
 import litellm
 from litellm.proxy.guardrails.guardrail_hooks.presidio import (
     _OPTIONAL_PresidioPIIMasking,
@@ -122,7 +120,7 @@ async def test_standard_logging_payload_includes_guardrail_information():
 
     # 1. call the pre call hook with guardrail
     request_data = {
-        "model": "gpt-4o",
+        "model": "gpt-5.5",
         "messages": [
             {"role": "user", "content": "Hello, my phone number is +1 412 555 1212"},
         ],
@@ -221,7 +219,7 @@ async def test_langfuse_trace_includes_guardrail_information():
         )
         # 1. call the pre call hook with guardrail
         request_data = {
-            "model": "gpt-4o",
+            "model": "gpt-5.5",
             "messages": [
                 {
                     "role": "user",
@@ -343,7 +341,7 @@ async def test_bedrock_guardrail_status_blocked():
         bedrock_guard.async_handler, "post", AsyncMock(return_value=mock_response)
     ):
         request_data = {
-            "model": "gpt-4o",
+            "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "harmful content"}],
             "mock_response": "Hello",
             "metadata": {},
@@ -440,7 +438,7 @@ async def test_bedrock_guardrail_status_success():
         bedrock_guard.async_handler, "post", AsyncMock(return_value=mock_response)
     ):
         request_data = {
-            "model": "gpt-4o",
+            "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "safe content"}],
             "mock_response": "Hello",
             "metadata": {},
@@ -524,7 +522,7 @@ async def test_bedrock_guardrail_status_failure():
         AsyncMock(side_effect=httpx.ConnectError("Connection failed")),
     ):
         request_data = {
-            "model": "gpt-4o",
+            "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "test content"}],
             "mock_response": "Hello",
             "metadata": {},
@@ -615,7 +613,7 @@ async def test_noma_guardrail_status_blocked():
         noma_guard.async_handler, "post", AsyncMock(return_value=mock_response)
     ):
         request_data = {
-            "model": "gpt-4o",
+            "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "harmful content"}],
             "mock_response": "Hello",
             "metadata": {},
@@ -703,7 +701,7 @@ async def test_noma_guardrail_status_success():
         noma_guard.async_handler, "post", AsyncMock(return_value=mock_response)
     ):
         request_data = {
-            "model": "gpt-4o",
+            "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "safe content"}],
             "mock_response": "Hello",
             "metadata": {},
@@ -808,3 +806,91 @@ def test_guardrail_status_fields_computation():
     )
     assert status_fields_no_guardrail.get("llm_api_status") == "success"
     assert status_fields_no_guardrail.get("guardrail_status") == "not_run"
+
+
+@pytest.mark.parametrize(
+    "status, guardrail_information, expected_guardrail_status",
+    [
+        pytest.param(
+            "failure",
+            [
+                {"guardrail_status": "success"},
+                {"guardrail_status": "guardrail_intervened"},
+            ],
+            "guardrail_intervened",
+            id="pre_call_success_before_blocker",
+        ),
+        pytest.param(
+            "failure",
+            [
+                {"guardrail_status": "guardrail_intervened"},
+                {"guardrail_status": "success"},
+            ],
+            "guardrail_intervened",
+            id="blocker_before_success",
+        ),
+        pytest.param(
+            "failure",
+            [
+                {"guardrail_status": "success"},
+                {"guardrail_status": "guardrail_failed_to_respond"},
+            ],
+            "guardrail_failed_to_respond",
+            id="failure_outranks_success",
+        ),
+        pytest.param(
+            "failure",
+            [
+                {"guardrail_status": "guardrail_failed_to_respond"},
+                {"guardrail_status": "guardrail_intervened"},
+            ],
+            "guardrail_intervened",
+            id="intervention_outranks_failure",
+        ),
+        pytest.param(
+            "success",
+            [
+                {"guardrail_status": "success"},
+                {"guardrail_status": "success"},
+            ],
+            "success",
+            id="all_success_stays_success",
+        ),
+        pytest.param(
+            "failure",
+            [
+                {"guardrail_status": "some_new_status"},
+                {"guardrail_status": "blocked"},
+            ],
+            "guardrail_intervened",
+            id="unknown_status_does_not_mask_blocker",
+        ),
+        pytest.param(
+            "failure",
+            [
+                {"guardrail_status": {"unhashable": True}},
+                {"guardrail_status": "guardrail_intervened"},
+            ],
+            "guardrail_intervened",
+            id="unhashable_status_is_skipped",
+        ),
+    ],
+)
+def test_guardrail_status_fields_severity_across_entries(
+    status, guardrail_information, expected_guardrail_status
+):
+    """
+    A blocked request must never be reported as a guardrail success.
+
+    With multiple guardrails on one request (e.g. a pre_call mask that passes,
+    then a post_call guardrail that blocks), entries are recorded in execution
+    order, so the earlier "success" entry must not shadow the later
+    "guardrail_intervened" entry: the aggregate takes the most severe status,
+    regardless of entry order.
+    """
+    from litellm.litellm_core_utils.litellm_logging import _get_status_fields
+
+    fields = _get_status_fields(
+        status=status, guardrail_information=guardrail_information, error_str=None
+    )
+    assert fields.get("guardrail_status") == expected_guardrail_status

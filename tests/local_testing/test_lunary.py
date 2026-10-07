@@ -1,8 +1,5 @@
 import io
-import os
-import sys
 
-sys.path.insert(0, os.path.abspath("../.."))
 
 import litellm
 from litellm import completion
@@ -24,9 +21,6 @@ def test_lunary_logging():
         print(response)
     except Exception as e:
         print(e)
-
-
-test_lunary_logging()
 
 
 def test_lunary_template():

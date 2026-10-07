@@ -1,15 +1,11 @@
 import json
 import os
-import sys
 from datetime import datetime
 from typing import AsyncIterator, Dict, Any
 import asyncio
 import unittest.mock
 from unittest.mock import AsyncMock, MagicMock
 
-sys.path.insert(
-    0, os.path.abspath("../../..")
-)  # Adds the parent directory to the system path
 import litellm
 import pytest
 from dotenv import load_dotenv
@@ -41,7 +37,6 @@ def event_loop():
 @pytest.fixture(scope="function", autouse=True)
 def setup_and_teardown(event_loop):  # Add event_loop as a dependency
     curr_dir = os.getcwd()
-    sys.path.insert(0, os.path.abspath("../.."))
 
     import litellm
     from litellm import Router
@@ -112,7 +107,7 @@ class TestAnthropicOpenAIAPI(BaseAnthropicMessagesTest):
     @property
     def model_config(self) -> Dict[str, Any]:
         return {
-            "model": "openai/gpt-4o-mini",
+            "model": "openai/gpt-4.1-mini",
             "client": None,
         }
 
@@ -121,7 +116,7 @@ class TestAnthropicOpenAIAPI(BaseAnthropicMessagesTest):
         """
         This is the model name that is expected to be in the logging payload
         """
-        return "gpt-4o-mini"
+        return "gpt-4.1-mini"
 
     @pytest.mark.asyncio
     async def test_anthropic_messages_litellm_router_streaming_with_logging(self):
@@ -136,6 +131,7 @@ async def test_anthropic_messages_streaming_with_bad_request():
     """
     Test the anthropic_messages with streaming request
     """
+    error = None
     try:
         response = await litellm.anthropic.messages.acreate(
             messages=[{"role": "user", "content": "hi"}],
@@ -149,12 +145,10 @@ async def test_anthropic_messages_streaming_with_bad_request():
             async for chunk in response:
                 print("chunk=", chunk)
     except Exception as e:
-        print("got exception", e)
-        print("vars", vars(e))
-        if hasattr(e, "status_code"):
-            assert getattr(e, "status_code") == 400
-        else:
-            assert isinstance(e, Exception)
+        error = e
+
+    if error is not None:
+        assert getattr(error, "status_code", 400) == 400, f"got {vars(error)}"
 
 
 @pytest.mark.asyncio
@@ -162,6 +156,7 @@ async def test_anthropic_messages_router_streaming_with_bad_request():
     """
     Test the anthropic_messages with streaming request
     """
+    error = None
     try:
         router = Router(
             model_list=[
@@ -186,12 +181,10 @@ async def test_anthropic_messages_router_streaming_with_bad_request():
             async for chunk in response:
                 print("chunk=", chunk)
     except Exception as e:
-        print("got exception", e)
-        print("vars", vars(e))
-        if hasattr(e, "status_code"):
-            assert getattr(e, "status_code") == 400
-        else:
-            assert isinstance(e, Exception)
+        error = e
+
+    if error is not None:
+        assert getattr(error, "status_code", 400) == 400, f"got {vars(error)}"
 
 
 @pytest.mark.asyncio
@@ -283,23 +276,23 @@ async def test_anthropic_messages_fallbacks():
     router = Router(
         model_list=[
             {
-                "model_name": "anthropic/claude-opus-4-20250514",
+                "model_name": "anthropic/claude-opus-4-7",
                 "litellm_params": {
-                    "model": "anthropic/claude-opus-4-20250514",
+                    "model": "anthropic/claude-opus-4-7",
                     "api_key": "bad-key",
                 },
             },
             {
-                "model_name": "bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0",
+                "model_name": "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0",
                 "litellm_params": {
-                    "model": "bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0",
+                    "model": "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0",
                 },
             },
         ],
         fallbacks=[
             {
-                "anthropic/claude-opus-4-20250514": [
-                    "bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0"
+                "anthropic/claude-opus-4-7": [
+                    "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0"
                 ]
             }
         ],
@@ -311,7 +304,7 @@ async def test_anthropic_messages_fallbacks():
     # Call the handler
     response = await router.aanthropic_messages(
         messages=messages,
-        model="anthropic/claude-opus-4-20250514",
+        model="anthropic/claude-opus-4-7",
         max_tokens=100,
         metadata={
             "user_id": "hello",
@@ -871,7 +864,7 @@ def test_sync_openai_messages():
     litellm._turn_on_debug()
     response = litellm.anthropic.messages.create(
         messages=[{"role": "user", "content": "Hello, can you tell me a short joke?"}],
-        model="openai/gpt-4o-mini",
+        model="openai/gpt-4.1-mini",
         max_tokens=100,
     )
     print("ANT response", response)

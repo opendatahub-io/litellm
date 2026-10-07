@@ -1,10 +1,8 @@
-import sys
 import os
 import io, asyncio
 
 # import logging
 # logging.basicConfig(level=logging.DEBUG)
-sys.path.insert(0, os.path.abspath("../.."))
 
 from litellm import completion
 import litellm
@@ -49,9 +47,6 @@ def test_wandb_logging_async():
         pass
     except Exception as e:
         pass
-
-
-test_wandb_logging_async()
 
 
 def test_wandb_logging():

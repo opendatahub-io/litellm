@@ -7,16 +7,11 @@ These tests verify that:
 3. The completion() and responses() API work with Qwen models
 """
 
-import json
 import os
-import sys
 from unittest.mock import MagicMock, patch, AsyncMock
 
 import pytest
 
-sys.path.insert(
-    0, os.path.abspath("../../../../../..")
-)  # Adds the parent directory to the system path
 
 import litellm
 from litellm.llms.vertex_ai.vertex_llm_base import VertexBase
@@ -179,7 +174,7 @@ async def test_vertex_ai_qwen_global_endpoint_url():
             "litellm.llms.custom_httpx.http_handler.AsyncHTTPHandler"
         ) as mock_http_handler,
         patch(
-            "litellm.llms.vertex_ai.gemini.vertex_and_google_ai_studio_gemini.VertexLLM._ensure_access_token",
+            "litellm.llms.vertex_ai.vertex_ai_partner_models.main.VertexAIPartnerModels._ensure_access_token",
             return_value=("fake-token", "test-project"),
         ),
         patch.dict(

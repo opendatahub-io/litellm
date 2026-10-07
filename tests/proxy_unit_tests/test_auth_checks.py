@@ -6,11 +6,7 @@ import traceback
 from dotenv import load_dotenv
 
 load_dotenv()
-import os
 
-sys.path.insert(
-    0, os.path.abspath("../..")
-)  # Adds the parent directory to the system path
 import pytest, litellm
 import httpx
 from litellm.proxy._types import UserAPIKeyAuth
@@ -38,8 +34,12 @@ from litellm.proxy.utils import CallInfo
 @pytest.mark.asyncio
 async def test_get_end_user_object(customer_spend, customer_budget):
     """
-    Scenario 1: normal
-    Scenario 2: user over budget
+    Scenario 1: normal - get_end_user_object returns the cached user
+    Scenario 2: user over budget - NOTE: budget enforcement now happens in 
+                common_checks() via _check_end_user_budget(), not in get_end_user_object()
+    
+    This test verifies that get_end_user_object correctly retrieves the end user
+    from cache. Budget enforcement is tested separately in test_check_end_user_budget().
     """
     end_user_id = "my-test-customer"
     _budget = LiteLLM_BudgetTable(max_budget=customer_budget)
@@ -58,31 +58,56 @@ async def test_get_end_user_object(customer_spend, customer_budget):
         value=end_user_obj,
         model_type=LiteLLM_EndUserTable,
     )
-    try:
-        await get_end_user_object(
-            end_user_id=end_user_id,
-            prisma_client="RANDOM VALUE",  # type: ignore
-            user_api_key_cache=_cache,
+    # get_end_user_object only fetches data - it no longer enforces budget
+    # Budget enforcement happens in common_checks() via _check_end_user_budget()
+    result = await get_end_user_object(
+        end_user_id=end_user_id,
+        prisma_client="RANDOM VALUE",  # type: ignore
+        user_api_key_cache=_cache,
+        route="/v1/chat/completions",
+    )
+    assert result is not None
+    assert result.user_id == end_user_id
+
+
+@pytest.mark.parametrize("customer_spend, customer_budget", [(0, 10), (10, 0)])
+@pytest.mark.asyncio
+async def test_check_end_user_budget(customer_spend, customer_budget):
+    """
+    Test _check_end_user_budget enforcement:
+    - Scenario 1: customer_spend=0, customer_budget=10 - should pass (under budget)
+    - Scenario 2: customer_spend=10, customer_budget=0 - should fail (over budget)
+    
+    Note: Budget enforcement for end users happens in common_checks() via 
+    _check_end_user_budget(), not in get_end_user_object().
+    """
+    from litellm.proxy.auth.auth_checks import _check_end_user_budget
+    
+    _budget = LiteLLM_BudgetTable(max_budget=customer_budget)
+    end_user_obj = LiteLLM_EndUserTable(
+        user_id="my-test-customer",
+        spend=customer_spend,
+        litellm_budget_table=_budget,
+        blocked=False,
+    )
+    
+    should_exceed = customer_spend > customer_budget
+    
+    if not should_exceed:
+        await _check_end_user_budget(
+            end_user_obj=end_user_obj,
             route="/v1/chat/completions",
         )
-        if customer_spend > customer_budget:
-            pytest.fail(
-                "Expected call to fail. Customer Spend={}, Customer Budget={}".format(
-                    customer_spend, customer_budget
-                )
-            )
-    except Exception as e:
-        if (
-            isinstance(e, litellm.BudgetExceededError)
-            and customer_spend > customer_budget
-        ):
-            pass
-        else:
-            pytest.fail(
-                "Expected call to work. Customer Spend={}, Customer Budget={}, Error={}".format(
-                    customer_spend, customer_budget, str(e)
-                )
-            )
+        return
+
+    with pytest.raises(litellm.BudgetExceededError) as exc_info:
+        await _check_end_user_budget(
+            end_user_obj=end_user_obj,
+            route="/v1/chat/completions",
+        )
+    # Verify the error has correct info
+    assert exc_info.value.current_cost == customer_spend
+    assert exc_info.value.max_budget == customer_budget
 
 
 @pytest.mark.parametrize(
@@ -138,7 +163,7 @@ async def test_can_key_call_model(model, expect_to_work):
     if expect_to_work:
         await can_key_call_model(**args)
     else:
-        with pytest.raises(Exception) as e:
+        with pytest.raises(Exception, match='key not allowed to access model\\. This key can only access') as e:
             await can_key_call_model(**args)
 
         print(e)
@@ -201,12 +226,14 @@ async def test_can_team_call_model(model, expect_to_work):
         (["bedrock/*"], "bedrock/anthropic.claude-3-5-sonnet-20240620", True),
         (["bedrock/*"], "bedrockz/anthropic.claude-3-5-sonnet-20240620", False),
         (["bedrock/us.*"], "bedrock/us.amazon.nova-micro-v1:0", True),
+        (["openai/*"], "ft:gpt-4-0613", True),
+        (["openai/*"], "bedrockz/ft:gpt-4-0613", False),
     ],
 )
 @pytest.mark.asyncio
 async def test_can_key_call_model_wildcard_access(key_models, model, expect_to_work):
+    from litellm.proxy._types import ProxyException
     from litellm.proxy.auth.auth_checks import can_key_call_model
-    from fastapi import HTTPException
 
     llm_model_list = [
         {
@@ -257,15 +284,13 @@ async def test_can_key_call_model_wildcard_access(key_models, model, expect_to_w
             llm_router=router,
         )
     else:
-        with pytest.raises(Exception) as e:
+        with pytest.raises(ProxyException):
             await can_key_call_model(
                 model=model,
                 llm_model_list=llm_model_list,
                 valid_token=user_api_key_object,
                 llm_router=router,
             )
-
-            print(e)
 
 
 @pytest.mark.parametrize(
@@ -293,6 +318,7 @@ async def test_wildcard_access_after_cost_map_reload(key_models, model, expect_t
     Fix: each reload now calls litellm.add_known_models(model_cost_map=new_map)
     with the fetched map passed explicitly to avoid any reference ambiguity.
     """
+    from litellm.proxy._types import ProxyException
     from litellm.proxy.auth.auth_checks import can_key_call_model
 
     # Build a new cost map that includes the brand-new model — exactly what
@@ -341,7 +367,7 @@ async def test_wildcard_access_after_cost_map_reload(key_models, model, expect_t
                 llm_router=router,
             )
         else:
-            with pytest.raises(Exception):
+            with pytest.raises(ProxyException):
                 await can_key_call_model(
                     model=model,
                     llm_model_list=llm_model_list,
@@ -415,13 +441,12 @@ async def test_is_valid_fallback_model():
     except Exception as e:
         pytest.fail(f"Expected is_valid_fallback_model to work, got exception: {e}")
 
-    try:
+    with pytest.raises(Exception, match="Invalid") as exc_info:
         await is_valid_fallback_model(
             model="gpt-4o", llm_router=router, user_model=None
         )
-        pytest.fail("Expected is_valid_fallback_model to fail")
-    except Exception as e:
-        assert "Invalid" in str(e)
+    e = exc_info.value
+    assert "Invalid" in str(e)
 
 
 @pytest.mark.parametrize(
@@ -442,7 +467,6 @@ async def test_virtual_key_max_budget_check(
     2. Raises BudgetExceededError when spend >= max_budget
     """
     from litellm.proxy.auth.auth_checks import _virtual_key_max_budget_check
-    from litellm.proxy.utils import ProxyLogging
 
     # Setup test data
     valid_token = UserAPIKeyAuth(
@@ -472,23 +496,21 @@ async def test_virtual_key_max_budget_check(
 
     proxy_logging_obj.budget_alerts = mock_budget_alert
 
-    try:
+    if expect_budget_error:
+        with pytest.raises(litellm.BudgetExceededError) as exc_info:
+            await _virtual_key_max_budget_check(
+                valid_token=valid_token,
+                proxy_logging_obj=proxy_logging_obj,
+                user_obj=user_obj,
+            )
+        assert exc_info.value.current_cost == token_spend
+        assert exc_info.value.max_budget == max_budget
+    else:
         await _virtual_key_max_budget_check(
             valid_token=valid_token,
             proxy_logging_obj=proxy_logging_obj,
             user_obj=user_obj,
         )
-        if expect_budget_error:
-            pytest.fail(
-                f"Expected BudgetExceededError for spend={token_spend}, max_budget={max_budget}"
-            )
-    except litellm.BudgetExceededError as e:
-        if not expect_budget_error:
-            pytest.fail(
-                f"Unexpected BudgetExceededError for spend={token_spend}, max_budget={max_budget}"
-            )
-        assert e.current_cost == token_spend
-        assert e.max_budget == max_budget
 
     await asyncio.sleep(1)
 
@@ -800,7 +822,6 @@ async def test_can_user_call_model_with_no_default_models():
 @pytest.mark.asyncio
 async def test_get_fuzzy_user_object():
     from litellm.proxy.auth.auth_checks import _get_fuzzy_user_object
-    from litellm.proxy.utils import PrismaClient
     from unittest.mock import AsyncMock, MagicMock
 
     # Setup mock Prisma client
@@ -922,7 +943,7 @@ async def test_can_key_call_model_with_aliases(model, alias_map, expect_to_work)
             llm_router=router,
         )
     else:
-        with pytest.raises(Exception) as e:
+        with pytest.raises(Exception, match='key not allowed to access model\\. This key can only access') as e:
             await can_key_call_model(
                 model=model,
                 llm_model_list=llm_model_list,

@@ -4,14 +4,10 @@ import os
 import pytest
 import random
 from typing import Any
-import sys
 from dotenv import load_dotenv
 
 load_dotenv()
 
-sys.path.insert(
-    0, os.path.abspath("../")
-)  # Adds the parent directory to the system path
 
 import litellm
 from pydantic import BaseModel
@@ -20,9 +16,9 @@ from litellm import utils, Router
 COMPLETION_TOKENS = 5
 base_model_list = [
     {
-        "model_name": "gpt-3.5-turbo",
+        "model_name": "gpt-5-mini",
         "litellm_params": {
-            "model": "gpt-3.5-turbo",
+            "model": "gpt-5-mini",
             "api_key": os.getenv("OPENAI_API_KEY"),
             "max_tokens": COMPLETION_TOKENS,
         },
@@ -74,14 +70,14 @@ def calculate_limits(list_of_messages):
 
 async def async_call(router: Router, list_of_messages) -> Any:
     tasks = [
-        router.acompletion(model="gpt-3.5-turbo", messages=m) for m in list_of_messages
+        router.acompletion(model="gpt-5-mini", messages=m) for m in list_of_messages
     ]
     return await asyncio.gather(*tasks)
 
 
 def sync_call(router: Router, list_of_messages) -> Any:
     return [
-        router.completion(model="gpt-3.5-turbo", messages=m) for m in list_of_messages
+        router.completion(model="gpt-5-mini", messages=m) for m in list_of_messages
     ]
 
 
@@ -149,19 +145,26 @@ def test_async_rate_limit(
     router: Router = router_factory(rpm, tpm, routing_strategy)
 
     print(f"router: {router.model_list}")
-    with pytest.raises(expected_exception) as excinfo:  # asserts correct type raised
-        if sync_mode:
-            results = sync_call(router, list_of_messages)
-        else:
-            results = asyncio.run(async_call(router, list_of_messages))
+    received = []
+
+    def _send_and_check():
+        results = (
+            sync_call(router, list_of_messages)
+            if sync_mode
+            else asyncio.run(async_call(router, list_of_messages))
+        )
+        received.extend(results)
         print(results)
         if len([i for i in results if i is not None]) != num_try_send:
             # since not all results got returned, raise rate limit error
             raise ValueError("No deployments available for selected model")
         raise ExpectNoException
 
+    with pytest.raises(expected_exception) as excinfo:  # asserts correct type raised
+        _send_and_check()
+
     print(expected_exception, excinfo)
     if expected_exception is ValueError:
         assert "No deployments available for selected model" in str(excinfo.value)
     else:
-        assert len([i for i in results if i is not None]) == num_try_send
+        assert len([i for i in received if i is not None]) == num_try_send

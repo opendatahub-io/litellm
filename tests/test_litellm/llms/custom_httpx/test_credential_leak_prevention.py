@@ -7,14 +7,11 @@ Covers:
 - _raise_masked_sync_error and _raise_masked_async_error
 """
 
-import os
-import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
-sys.path.insert(0, os.path.abspath("../../../.."))
 
 from litellm.llms.custom_httpx.http_handler import (
     AsyncHTTPHandler,
@@ -103,6 +100,31 @@ class TestMaskedHTTPStatusError:
         assert req is not None
         # The attached request must be the masked one, not the original.
         assert "KEY_X" not in str(req.url)
+
+    def test_handles_streaming_request_content(self):
+        """MaskedHTTPStatusError must not crash when request body is streamed."""
+        streaming_request = httpx.Request(
+            "POST",
+            "https://api.openai.com/v1/images/edits?key=SECRET_KEY",
+            stream=httpx.ByteStream(b"multipart-data"),
+        )
+        response = httpx.Response(
+            400,
+            request=streaming_request,
+            content=b'{"error": "bad request"}',
+        )
+        orig = httpx.HTTPStatusError(
+            message="400 Bad Request",
+            request=streaming_request,
+            response=response,
+        )
+
+        masked = MaskedHTTPStatusError(orig)
+
+        assert masked.status_code == 400
+        assert masked.response.status_code == 400
+        assert masked.response.request is not None
+        assert "SECRET_KEY" not in str(masked.request.url)
 
     def test_strips_content_encoding_to_avoid_double_decode(self):
         """If the upstream response declared Content-Encoding (e.g. gzip),
@@ -262,10 +284,11 @@ class TestHTTPHandlerErrorPaths:
             "send",
             side_effect=_make_httpx_status_error(url="https://api.test.com?key=SECRET"),
         ):
+            kwargs = {"url": "https://api.test.com?key=SECRET"}
+            if method != "delete":
+                kwargs["data"] = {"test": 1}
+
             with pytest.raises(MaskedHTTPStatusError) as exc_info:
-                kwargs = {"url": "https://api.test.com?key=SECRET"}
-                if method != "delete":
-                    kwargs["data"] = {"test": 1}
                 getattr(sync_handler, method)(**kwargs)
 
             assert "SECRET" not in str(exc_info.value.request.url)
@@ -279,10 +302,11 @@ class TestHTTPHandlerErrorPaths:
             new_callable=AsyncMock,
             side_effect=_make_httpx_status_error(url="https://api.test.com?key=SECRET"),
         ):
+            kwargs = {"url": "https://api.test.com?key=SECRET"}
+            if method != "delete":
+                kwargs["data"] = {"test": 1}
+
             with pytest.raises(MaskedHTTPStatusError) as exc_info:
-                kwargs = {"url": "https://api.test.com?key=SECRET"}
-                if method != "delete":
-                    kwargs["data"] = {"test": 1}
                 await getattr(async_handler, method)(**kwargs)
 
             assert "SECRET" not in str(exc_info.value.request.url)

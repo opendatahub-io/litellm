@@ -9,21 +9,18 @@ Tests use a fake/mocked HTTP layer to verify the full request pipeline:
 """
 
 import json
-import os
-import sys
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 
-sys.path.insert(0, os.path.abspath("../.."))
 
 import litellm
 from litellm.llms.custom_httpx.http_handler import HTTPHandler
 
 MODEL = "bedrock/mantle/anthropic.claude-mythos-preview"
 REGION = "us-east-1"
-EXPECTED_URL = f"https://bedrock-mantle.{REGION}.api.aws/v1/messages"
+EXPECTED_URL = f"https://bedrock-mantle.{REGION}.api.aws/anthropic/v1/messages"
 
 FAKE_ANTHROPIC_RESPONSE = {
     "id": "msg_fake123",
@@ -143,7 +140,7 @@ def test_mantle_region_reflected_in_url():
                 pass
 
             call_kwargs = mock_post.call_args.kwargs
-            expected = f"https://bedrock-mantle.{region}.api.aws/v1/messages"
+            expected = f"https://bedrock-mantle.{region}.api.aws/anthropic/v1/messages"
             assert (
                 call_kwargs["url"] == expected
             ), f"region={region}: expected URL {expected}, got {call_kwargs['url']}"

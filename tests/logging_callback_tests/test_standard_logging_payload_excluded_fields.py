@@ -13,15 +13,12 @@ Example config:
       standard_logging_payload_excluded_fields: ["response", "messages"]
 """
 
-import os
-import sys
 from copy import deepcopy
 from typing import Dict, List, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-sys.path.insert(0, os.path.abspath("../.."))
 
 import litellm
 from litellm.integrations.custom_logger import CustomLogger
@@ -49,7 +46,7 @@ def create_sample_standard_logging_payload() -> Dict:
         "completionStartTime": 1234567890.5,
         "response_time": 1.0,
         "model_map_information": {},
-        "model": "gpt-4",
+        "model": "gpt-5.5",
         "model_id": "model-123",
         "model_group": None,
         "api_base": "https://api.openai.com/v1",

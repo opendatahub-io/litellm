@@ -5,19 +5,30 @@
 # Vertex AI OCR) are replayed for 24h. See tests/llm_translation/Readme.md
 # for the design overview.
 
-import os
-import sys
+from typing import Final
 
 import pytest
 
-sys.path.insert(0, os.path.abspath("../.."))
 
-from tests._vcr_conftest_common import (  # noqa: E402
+from tests._vcr_conftest_common import (  # noqa: E402,F401
     VerboseReporterState,
+    _pin_multipart_boundary,
     apply_vcr_auto_marker_to_items,
+    emit_cassette_cache_session_banner,
+    emit_vcr_classification_summary,
+    emit_vcr_diagnostic_log,
+    install_live_call_probe,
     record_vcr_outcome,
     register_persister_if_enabled,
+    reset_vcr_diag_dir,
     vcr_config_dict,
+)
+
+_VCR_INCOMPATIBLE_NODEID_SUFFIXES: Final[tuple[str, ...]] = (
+    "test_rust_bridge.py::test_native_public_ocr_matches_python[mistral/mistral-ocr-latest-False]",
+    "test_rust_bridge.py::test_native_public_ocr_matches_python[mistral/mistral-ocr-latest-True]",
+    "test_rust_bridge.py::test_native_public_ocr_matches_python[azure_ai/doc-intelligence/prebuilt-read-False]",
+    "test_rust_bridge.py::test_native_public_ocr_matches_python[azure_ai/doc-intelligence/prebuilt-read-True]",
 )
 
 _verbose_state = VerboseReporterState()
@@ -41,12 +52,14 @@ def pytest_runtest_makereport(item, call):
 
 @pytest.fixture(autouse=True)
 def _vcr_outcome_gate(request, vcr):
+    install_live_call_probe(request, vcr)
     yield
     record_vcr_outcome(request, vcr)
 
 
 def pytest_configure(config):
     _verbose_state.remember_pluginmanager(config)
+    reset_vcr_diag_dir()
 
 
 def pytest_runtest_logreport(report):
@@ -54,4 +67,13 @@ def pytest_runtest_logreport(report):
 
 
 def pytest_collection_modifyitems(config, items):
-    apply_vcr_auto_marker_to_items(items)
+    apply_vcr_auto_marker_to_items(
+        items,
+        skip_nodeid_suffixes=_VCR_INCOMPATIBLE_NODEID_SUFFIXES,
+    )
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    emit_cassette_cache_session_banner(terminalreporter)
+    emit_vcr_classification_summary(terminalreporter)
+    emit_vcr_diagnostic_log(terminalreporter)

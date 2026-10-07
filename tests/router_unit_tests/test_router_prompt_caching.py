@@ -1,14 +1,9 @@
-import sys
-import os
 import traceback
 import asyncio
 from dotenv import load_dotenv
 from fastapi import Request
 from datetime import datetime
 
-sys.path.insert(
-    0, os.path.abspath("../..")
-)  # Adds the parent directory to the system path
 from litellm import Router
 import pytest
 import litellm
@@ -124,7 +119,7 @@ async def test_router_prompt_caching_same_cacheable_prefix_routes_to_same_deploy
             {
                 "model_name": "test-model",
                 "litellm_params": {
-                    "model": "gpt-3.5-turbo",
+                    "model": "gpt-5-mini",
                     "api_base": "https://exampleopenaiendpoint-production-0ee2.up.railway.app/v1",
                     "api_key": f"test-key-{i}",
                 },

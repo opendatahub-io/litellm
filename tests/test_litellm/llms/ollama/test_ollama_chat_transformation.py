@@ -86,7 +86,6 @@ class TestOllamaChatConfigResponseFormat:
     def test_transform_request_loads_config_parameters(self):
         """Test that transform_request loads config parameters without overriding existing optional_params"""
         # Set config parameters on the class
-        import litellm
 
         litellm.OllamaChatConfig(num_ctx=8000, temperature=0.0)
 
@@ -383,7 +382,6 @@ class TestOllamaToolCalling:
         import json
         from unittest.mock import MagicMock
 
-        import litellm
         from litellm.types.utils import Choices, Message, ModelResponse
 
         config = OllamaChatConfig()
@@ -617,6 +615,46 @@ class TestOllamaFinishReasonLength:
             result.choices[0].finish_reason == "stop"
         ), f"Expected 'stop' for natural finish, got '{result.choices[0].finish_reason}'"
 
+    def test_finish_reason_tool_calls_streamed_before_done_chunk(self):
+        """Streaming: tool_calls arriving mid-stream (not on the done chunk) must
+        still produce finish_reason='tool_calls' on the final chunk.
+
+        Regression test for https://github.com/BerriAI/litellm/issues/34692:
+        Ollama emits tool_calls in an earlier chunk and the done chunk carries
+        none, which left finish_reason at 'stop' and made the Anthropic
+        /v1/messages bridge emit stop_reason 'end_turn' instead of 'tool_use'.
+        """
+        iterator = OllamaChatCompletionResponseIterator(
+            streaming_response=iter([]),
+            sync_stream=True,
+        )
+
+        tool_chunk = {
+            "model": "qwen3:8b",
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"function": {"name": "get_weather", "arguments": {"city": "San Francisco"}}}
+                ],
+            },
+            "done": False,
+        }
+        done_chunk = {
+            "model": "qwen3:8b",
+            "message": {"role": "assistant", "content": ""},
+            "done": True,
+            "done_reason": "stop",
+        }
+
+        tool_result = iterator.chunk_parser(tool_chunk)
+        assert tool_result.choices[0].delta.tool_calls is not None
+
+        done_result = iterator.chunk_parser(done_chunk)
+        assert (
+            done_result.choices[0].finish_reason == "tool_calls"
+        ), f"Expected 'tool_calls' when tool_calls were streamed earlier, got '{done_result.choices[0].finish_reason}'"
+
 
 class TestOllamaReasoningContentStreaming:
     """Test that reasoning_content is properly extracted from all thinking chunks."""
@@ -693,6 +731,71 @@ class TestOllamaReasoningContentStreaming:
         assert result2.choices[0].delta.content == "Here is my answer."
         # reasoning_content is not set when there's no thinking in the chunk
         assert getattr(result2.choices[0].delta, "reasoning_content", None) is None
+
+    def test_thinking_and_content_in_same_chunk(self):
+        """
+        Test that a chunk containing both thinking and content preserves both fields.
+        """
+        iterator = OllamaChatCompletionResponseIterator(
+            streaming_response=iter([]),
+            sync_stream=True,
+        )
+
+        chunk = {
+            "model": "deepseek-r1",
+            "message": {
+                "role": "assistant",
+                "thinking": "Let me reason first.",
+                "content": "Final answer.",
+            },
+            "done": False,
+        }
+
+        result = iterator.chunk_parser(chunk)
+
+        assert result.choices[0].delta.reasoning_content == "Let me reason first."
+        assert result.choices[0].delta.content == "Final answer."
+
+    def test_streaming_chunks_ignore_inactive_empty_reasoning_fields(self):
+        """
+        Test that Ollama chunks with inactive empty fields stay in the active delta.
+        """
+        iterator = OllamaChatCompletionResponseIterator(
+            streaming_response=iter([]),
+            sync_stream=True,
+        )
+
+        chunk = {
+            "model": "deepseek-r1",
+            "message": {
+                "role": "assistant",
+                "thinking": "Let me reason first.",
+                "content": "",
+            },
+            "done": False,
+        }
+
+        result = iterator.chunk_parser(chunk)
+
+        assert result.choices[0].delta.reasoning_content == "Let me reason first."
+        assert result.choices[0].delta.content is None
+        assert iterator.finished_reasoning_content is False
+
+        content_chunk = {
+            "model": "deepseek-r1",
+            "message": {
+                "role": "assistant",
+                "thinking": "",
+                "content": "Final answer.",
+            },
+            "done": False,
+        }
+
+        result = iterator.chunk_parser(content_chunk)
+
+        assert getattr(result.choices[0].delta, "reasoning_content", None) is None
+        assert result.choices[0].delta.content == "Final answer."
+        assert iterator.finished_reasoning_content is True
 
     def test_think_tags_in_content(self):
         """

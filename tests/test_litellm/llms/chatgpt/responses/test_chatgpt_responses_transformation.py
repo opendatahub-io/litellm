@@ -5,25 +5,28 @@ Source: litellm/llms/chatgpt/responses/transformation.py
 """
 
 import json
-import os
-import sys
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 
-sys.path.insert(0, os.path.abspath("../../../../.."))
-
+import litellm
+from litellm.llms.chatgpt.responses.transformation import ChatGPTResponsesAPIConfig
+from litellm.llms.openai.common_utils import OpenAIError
+from litellm.main import responses_api_bridge_check
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import LlmProviders
 from litellm.utils import ProviderConfigManager
-from litellm.llms.chatgpt.responses.transformation import ChatGPTResponsesAPIConfig
 
 
 class TestChatGPTResponsesAPITransformation:
     @pytest.mark.parametrize(
         "model_name",
         [
+            "chatgpt/gpt-5.5",
+            "chatgpt/gpt-5.6-luna",
+            "chatgpt/gpt-5.6-sol",
+            "chatgpt/gpt-5.6-terra",
             "chatgpt/gpt-5.4",
             "chatgpt/gpt-5.4-pro",
             "chatgpt/gpt-5.3-chat-latest",
@@ -41,6 +44,52 @@ class TestChatGPTResponsesAPITransformation:
         assert config is not None
         assert isinstance(config, ChatGPTResponsesAPIConfig)
         assert config.custom_llm_provider == LlmProviders.CHATGPT
+
+    @pytest.mark.parametrize(
+        "model_name",
+        [
+            "chatgpt/gpt-5.5",
+            "chatgpt/gpt-5.6-luna",
+            "chatgpt/gpt-5.6-sol",
+            "chatgpt/gpt-5.6-terra",
+        ],
+    )
+    def test_chatgpt_responses_model_metadata(self, model_name: str, local_model_cost_map: None) -> None:
+        model_info = litellm.get_model_info(model_name)
+
+        assert model_info["litellm_provider"] == "chatgpt"
+        assert model_info["mode"] == "responses"
+        assert model_info["supported_endpoints"] == [
+            "/v1/chat/completions",
+            "/v1/responses",
+        ]
+        assert model_info["max_input_tokens"] == 1050000
+        assert model_info["max_output_tokens"] == 128000
+
+    @pytest.mark.parametrize(
+        "model_name",
+        [
+            "gpt-5.5",
+            "gpt-5.6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+        ],
+    )
+    def test_chatgpt_models_bridge_chat_completions_to_responses(
+        self, model_name: str, local_model_cost_map: None
+    ) -> None:
+        """A chat completions request for these models must take the Responses bridge.
+
+        `gpt-5.6-*` also exists as an openai chat model, so an unregistered
+        chatgpt model resolves to mode "chat" here and never reaches the bridge.
+        """
+        model_info, resolved_model = responses_api_bridge_check(
+            model=model_name,
+            custom_llm_provider="chatgpt",
+        )
+
+        assert model_info["mode"] == "responses"
+        assert resolved_model == model_name
 
     @patch("litellm.llms.chatgpt.responses.transformation.Authenticator")
     def test_chatgpt_responses_endpoint_url(self, mock_authenticator_class):
@@ -201,3 +250,127 @@ class TestChatGPTResponsesAPITransformation:
         )
 
         assert parsed.output_text == "Hello!"
+
+    @pytest.mark.parametrize(
+        ("model_name", "response_model"),
+        [
+            ("chatgpt/gpt-5.2-codex", "gpt-5.2-codex"),
+            ("chatgpt/gpt-5.3-codex", "gpt-5.3-codex"),
+        ],
+    )
+    def test_chatgpt_non_stream_sse_response_recovers_output_items(
+        self, model_name: str, response_model: str
+    ):
+        config = ChatGPTResponsesAPIConfig()
+        response_payload = {
+            "id": "resp_test",
+            "object": "response",
+            "created_at": 1700000000,
+            "status": "completed",
+            "model": response_model,
+            "output": [],
+        }
+        streamed_output_item = {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Hello from stream!"}],
+        }
+        sse_body = "\n".join(
+            [
+                f"data: {json.dumps({'type': 'response.output_item.done', 'output_index': 0, 'item': streamed_output_item})}",
+                f"data: {json.dumps({'type': 'response.completed', 'response': response_payload})}",
+                "data: [DONE]",
+                "",
+            ]
+        )
+        raw_response = httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, text=sse_body
+        )
+        logging_obj = MagicMock()
+
+        parsed = config.transform_response_api_response(
+            model=model_name,
+            raw_response=raw_response,
+            logging_obj=logging_obj,
+        )
+
+        assert parsed.output_text == "Hello from stream!"
+
+    def test_chatgpt_non_stream_sse_recovers_whitespace_padded_chunks(self):
+        """Chunks with leading whitespace before `data:` must still parse.
+
+        `_strip_sse_data_from_chunk` only matches the prefix at position 0,
+        so without an outer `.strip()` such chunks would fail JSON parsing
+        and silently drop the contained event.
+        """
+        config = ChatGPTResponsesAPIConfig()
+        response_payload = {
+            "id": "resp_test",
+            "object": "response",
+            "created_at": 1700000000,
+            "status": "completed",
+            "model": "gpt-5.4",
+            "output": [],
+        }
+        streamed_output_item = {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Recovered from padded"}],
+        }
+        sse_body = "\n".join(
+            [
+                f"   data:  {json.dumps({'type': 'response.output_item.done', 'output_index': 0, 'item': streamed_output_item})}   ",
+                f"\tdata: {json.dumps({'type': 'response.completed', 'response': response_payload})}",
+                "data: [DONE]",
+                "",
+            ]
+        )
+        raw_response = httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, text=sse_body
+        )
+        logging_obj = MagicMock()
+
+        parsed = config.transform_response_api_response(
+            model="chatgpt/gpt-5.4",
+            raw_response=raw_response,
+            logging_obj=logging_obj,
+        )
+
+        assert parsed.output_text == "Recovered from padded"
+
+    @pytest.mark.parametrize(
+        "error_chunk",
+        [
+            {
+                "type": "response.failed",
+                "response": {"error": {"message": "ChatGPT upstream failed"}},
+            },
+            {
+                "type": "error",
+                "error": {"message": "ChatGPT upstream failed"},
+            },
+        ],
+    )
+    def test_chatgpt_non_stream_sse_response_raises_openai_error(self, error_chunk):
+        config = ChatGPTResponsesAPIConfig()
+        sse_body = "\n".join(
+            [
+                f"data: {json.dumps(error_chunk)}",
+                "data: [DONE]",
+                "",
+            ]
+        )
+        raw_response = httpx.Response(
+            502, headers={"content-type": "text/event-stream"}, text=sse_body
+        )
+        logging_obj = MagicMock()
+
+        with pytest.raises(OpenAIError) as exc_info:
+            config.transform_response_api_response(
+                model="chatgpt/gpt-5.4",
+                raw_response=raw_response,
+                logging_obj=logging_obj,
+            )
+
+        assert "ChatGPT upstream failed" in str(exc_info.value)
+        assert exc_info.value.status_code == 502

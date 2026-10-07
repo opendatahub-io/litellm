@@ -1,9 +1,7 @@
 import io
 import os
-import sys
 
 
-sys.path.insert(0, os.path.abspath("../.."))
 
 import asyncio
 import gzip
@@ -52,7 +50,6 @@ async def test_get_credentials_from_env():
     assert credentials["LANGSMITH_TENANT_ID"] == "test-tenant-id"
 
     # Test tenant_id from environment variable
-    import os
 
     os.environ["LANGSMITH_TENANT_ID"] = "env-tenant-id"
     credentials = logger.get_credentials_from_env()
@@ -332,7 +329,7 @@ async def test_langsmith_key_based_logging():
 
         litellm.callbacks = [LangsmithLogger()]
         response = await litellm.acompletion(
-            model="gpt-3.5-turbo",
+            model="gpt-4.1-mini",
             messages=[{"role": "user", "content": "Test message"}],
             max_tokens=10,
             temperature=0.2,
@@ -373,7 +370,7 @@ async def test_langsmith_key_based_logging():
                     "inputs": {
                         "id": "chatcmpl-82699ee4-7932-4fc0-9585-76abc8caeafa",
                         "call_type": "acompletion",
-                        "model": "gpt-3.5-turbo",
+                        "model": "gpt-4.1-mini",
                         "messages": [{"role": "user", "content": "Test message"}],
                         "model_parameters": {
                             "temperature": 0.2,
@@ -382,7 +379,7 @@ async def test_langsmith_key_based_logging():
                     },
                     "outputs": {
                         "id": "chatcmpl-82699ee4-7932-4fc0-9585-76abc8caeafa",
-                        "model": "gpt-3.5-turbo",
+                        "model": "gpt-4.1-mini",
                         "choices": [
                             {
                                 "finish_reason": "stop",
@@ -468,7 +465,7 @@ async def test_langsmith_queue_logging():
         # Make multiple calls to ensure we don't hit the batch size
         for _ in range(5):
             response = await litellm.acompletion(
-                model="gpt-3.5-turbo",
+                model="gpt-4.1-mini",
                 messages=[{"role": "user", "content": "Test message"}],
                 max_tokens=10,
                 temperature=0.2,
@@ -487,7 +484,7 @@ async def test_langsmith_queue_logging():
         # Now make calls to exceed the batch size
         for _ in range(3):
             response = await litellm.acompletion(
-                model="gpt-3.5-turbo",
+                model="gpt-4.1-mini",
                 messages=[{"role": "user", "content": "Test message"}],
                 max_tokens=10,
                 temperature=0.2,

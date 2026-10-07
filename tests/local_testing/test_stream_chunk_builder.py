@@ -1,6 +1,5 @@
 import asyncio
 import os
-import sys
 import time
 import traceback
 
@@ -9,19 +8,15 @@ from typing import List
 from litellm.types.utils import StreamingChoices, ChatCompletionAudioResponse
 
 
-def check_non_streaming_response(completion):
-    assert completion.choices[0].message.audio is not None, "Audio response is missing"
-    print("audio", completion.choices[0].message.audio)
+def check_non_streaming_response(response):
+    assert response.choices[0].message.audio is not None, "Audio response is missing"
+    print("audio", response.choices[0].message.audio)
     assert isinstance(
-        completion.choices[0].message.audio, ChatCompletionAudioResponse
+        response.choices[0].message.audio, ChatCompletionAudioResponse
     ), "Invalid audio response type"
-    assert len(completion.choices[0].message.audio.data) > 0, "Audio data is empty"
+    assert len(response.choices[0].message.audio.data) > 0, "Audio data is empty"
 
 
-sys.path.insert(
-    0, os.path.abspath("../..")
-)  # Adds the parent directory to the system path
-import os
 
 import dotenv
 from openai import OpenAI
@@ -594,7 +589,6 @@ def test_stream_chunk_builder_multiple_tool_calls():
 
 
 def test_stream_chunk_builder_openai_prompt_caching():
-    from openai import OpenAI
     from pydantic import BaseModel
 
     client = OpenAI(
@@ -639,7 +633,6 @@ def test_stream_chunk_builder_openai_prompt_caching():
 @pytest.mark.flaky(retries=5, delay=2)
 def test_stream_chunk_builder_openai_audio_output_usage():
     from pydantic import BaseModel
-    from openai import OpenAI
     from typing import Optional
 
     client = OpenAI(
@@ -649,7 +642,7 @@ def test_stream_chunk_builder_openai_audio_output_usage():
 
     try:
         completion = client.chat.completions.create(
-            model="gpt-4o-audio-preview",
+            model="gpt-audio-1.5",
             modalities=["text", "audio"],
             audio={"voice": "alloy", "format": "pcm16"},
             messages=[{"role": "user", "content": "response in 1 word - yes or no"}],
@@ -657,8 +650,14 @@ def test_stream_chunk_builder_openai_audio_output_usage():
             stream_options={"include_usage": True},
         )
     except Exception as e:
-        if "openai-internal" in str(e):
-            pytest.skip("Skipping test due to openai-internal error")
+        err = str(e).lower()
+        if (
+            "model_not_found" in err
+            or "does not exist" in err
+            or "openai-internal" in err
+        ):
+            pytest.skip(f"Skipping - upstream gpt-audio-1.5 unavailable: {e}")
+        raise
 
     chunks = []
     for chunk in completion:
@@ -714,7 +713,6 @@ def test_stream_chunk_builder_tool_calls_list():
         Function,
         ModelResponseStream,
         Delta,
-        StreamingChoices,
         ChatCompletionDeltaToolCall,
     )
 
@@ -865,7 +863,7 @@ def load_env():
     }
     LLAMA3_3 = {
         "messages": messages,
-        "model": "groq/llama-3.3-70b-versatile",
+        "model": "groq/openai/gpt-oss-120b",
         "api_base": "https://api.groq.com/openai/v1",
         "temperature": 0.0,
         "tools": tools,
