@@ -1346,8 +1346,6 @@ def _check_user_update_authz(
     if user_request.user_role is not None and user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN.value:
         raise HTTPException(status_code=403, detail="Only proxy admins can modify user roles.")
 
-    _check_user_update_authz(user_request, user_api_key_dict, existing_user_row)
-
     if existing_user_row is not None:
         typed_row: Final = LiteLLM_UserTable.model_validate(existing_user_row.model_dump(exclude_none=True))
         if not can_user_call_user_update(user_api_key_dict=user_api_key_dict, user_info=typed_row):

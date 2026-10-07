@@ -125,13 +125,6 @@ _request_upstream_url: Final[contextvars.ContextVar[str | None]] = contextvars.C
     "_request_upstream_url", default=None
 )
 
-# Per-request extra headers forwarded from the client request.
-# Populated from MCPServer.extra_headers names matched against raw request
-# headers in server.py before dispatching to a local/OpenAPI tool handler.
-_request_extra_headers: contextvars.ContextVar[Optional[Dict[str, str]]] = (
-    contextvars.ContextVar("_request_extra_headers", default=None)
-)
-
 
 def _sanitize_path_parameter_value(param_value: object, param_name: str) -> str:
     """Ensure path params cannot introduce directory traversal."""
