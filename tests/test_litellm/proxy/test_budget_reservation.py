@@ -1249,9 +1249,9 @@ async def test_should_clamp_reservation_to_model_ceiling_when_caller_overrequest
             "max_output_tokens": model_ceiling,
         },
     ):
-        reservation = await reserve_budget_for_request(
+        first = await reserve_budget_for_request(
             request_body=request_body,
-            route="/chat/completions",
+            route="/v1/images/generations",
             llm_router=None,
             valid_token=valid_token,
             team_object=None,
